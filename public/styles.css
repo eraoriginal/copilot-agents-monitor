@@ -461,7 +461,10 @@ main {
 
 #flow {
 	position: relative;
-	overflow-x: auto;
+	/* Never a scrollbar: the lines and packets are kept inside by construction (the padding below
+	   holds the bus under the last row), and whatever might still stick out is cut, not scrolled. */
+	overflow: clip;
+	padding: 10px 8px 36px;
 	--rail: 30px;
 	--lane: 18px;
 	--edge: var(--line-strong);
@@ -521,7 +524,7 @@ main {
 	display: grid;
 	/* Flexible tracks: the browser counts columns by their minimum, so three fit where a capped
 	   maximum would have allowed two. Empty tracks collapse, and a lone card stays centred. */
-	grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+	grid-template-columns: repeat(auto-fit, minmax(min(180px, 100%), 1fr));
 	gap: 64px var(--lane);
 	align-items: start;
 }
@@ -803,27 +806,53 @@ main {
 	background: var(--m-opus);
 }
 
-/* Packets travelling along a connector: a brief going down, a result coming back. */
+/* A packet travelling along a line: a dot on the line, its label beside it. The label sits on the
+   side with room, so that nothing ever sticks out of the panel. */
 .packet {
 	position: absolute;
 	top: 0;
 	left: 0;
+	width: 0;
+	height: 0;
 	z-index: 3;
 	pointer-events: none;
-	white-space: nowrap;
-	font-size: 10px;
-	line-height: 1.4;
-	padding: 1px 6px;
-	border-radius: 3px;
-	border: 1px solid var(--accent);
 	color: var(--accent);
-	background: var(--panel);
-	box-shadow: 0 0 10px var(--accent-soft), 0 0 0 1px var(--panel);
 }
 
 .packet.good {
-	border-color: var(--good);
 	color: var(--good);
+}
+
+.packet i {
+	position: absolute;
+	left: -4px;
+	top: -4px;
+	width: 8px;
+	height: 8px;
+	border-radius: 50%;
+	background: currentColor;
+	box-shadow: 0 0 10px currentColor;
+}
+
+.packet b {
+	position: absolute;
+	top: -9px;
+	white-space: nowrap;
+	font-size: 10px;
+	font-weight: 400;
+	line-height: 16px;
+	padding: 0 6px;
+	border-radius: 3px;
+	border: 1px solid currentColor;
+	background: var(--panel);
+}
+
+.packet[data-side="right"] b {
+	left: 10px;
+}
+
+.packet[data-side="left"] b {
+	right: 10px;
 }
 
 .status {

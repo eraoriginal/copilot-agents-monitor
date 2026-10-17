@@ -81,12 +81,21 @@ export function sendPacket(layer, points, { label, tone = "accent", duration = 1
 	let travelled = 0;
 	const frames = points.map((point, i) => {
 		if (i > 0) travelled += lengths[i - 1];
-		return { transform: `translate(${point.x}px, ${point.y}px) translate(-50%, -50%)`, offset: travelled / total };
+		return { transform: `translate(${point.x}px, ${point.y}px)`, offset: travelled / total };
 	});
 	const packet = document.createElement("span");
 	packet.className = `packet ${tone}`;
-	packet.textContent = label;
+	const text = document.createElement("b");
+	text.textContent = label;
+	packet.append(document.createElement("i"), text);
 	layer.append(packet);
+	// The dot rides the line; its label goes to whichever side of the route has the room, so that
+	// it never sticks out of the layer.
+	const xs = points.map((point) => point.x);
+	const needed = text.offsetWidth + 14;
+	const roomRight = layer.clientWidth - Math.max(...xs);
+	const roomLeft = Math.min(...xs);
+	packet.dataset.side = roomRight >= needed || roomRight >= roomLeft ? "right" : "left";
 	// A long route takes longer: the packet keeps a readable speed.
 	const animation = packet.animate(frames, { duration: Math.max(duration, total * 2.2), easing: "cubic-bezier(.45,.05,.35,1)" });
 	animation.onfinish = () => packet.remove();
