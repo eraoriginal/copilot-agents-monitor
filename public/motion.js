@@ -71,21 +71,15 @@ export function flash(node, className) {
 }
 
 /**
- * Sends a labeled packet along `points` (page coordinates, in order from the source to the target),
- * drawn inside `layer`. `up` sends it back the other way.
+ * Sends a labeled packet along `points`, in the coordinates of the layer's content, from the first
+ * point to the last. The layer must be positioned: the packet is drawn inside it.
  */
-export function sendPacket(layer, points, { label, tone = "accent", up = false, duration = 1100 }) {
+export function sendPacket(layer, points, { label, tone = "accent", duration = 1100 }) {
 	if (!motionAllowed() || points.length < 2) return;
-	const base = layer.getBoundingClientRect();
-	let path = points.map((point) => ({
-		x: point.x - base.left + layer.scrollLeft,
-		y: point.y - base.top + layer.scrollTop,
-	}));
-	if (up) path = path.reverse();
-	const lengths = path.slice(1).map((point, i) => Math.hypot(point.x - path[i].x, point.y - path[i].y));
+	const lengths = points.slice(1).map((point, i) => Math.hypot(point.x - points[i].x, point.y - points[i].y));
 	const total = lengths.reduce((sum, length) => sum + length, 0) || 1;
 	let travelled = 0;
-	const frames = path.map((point, i) => {
+	const frames = points.map((point, i) => {
 		if (i > 0) travelled += lengths[i - 1];
 		return { transform: `translate(${point.x}px, ${point.y}px) translate(-50%, -50%)`, offset: travelled / total };
 	});
@@ -93,7 +87,8 @@ export function sendPacket(layer, points, { label, tone = "accent", up = false, 
 	packet.className = `packet ${tone}`;
 	packet.textContent = label;
 	layer.append(packet);
-	const animation = packet.animate(frames, { duration, easing: "cubic-bezier(.45,.05,.35,1)" });
+	// A long route takes longer: the packet keeps a readable speed.
+	const animation = packet.animate(frames, { duration: Math.max(duration, total * 2.2), easing: "cubic-bezier(.45,.05,.35,1)" });
 	animation.onfinish = () => packet.remove();
 	animation.oncancel = () => packet.remove();
 }

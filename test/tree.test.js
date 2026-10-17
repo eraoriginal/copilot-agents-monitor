@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 import { createStore, deriveSession, ingest } from "../public/model.js";
-import { childrenOf, launchOf, waveStarts } from "../public/tree.js";
+import { childrenOf, groupWaves, launchOf, waveStarts } from "../public/tree.js";
 
 const T0 = 1_792_273_390_000;
 let n = 0;
@@ -100,4 +100,15 @@ test("a running agent keeps its wave open, so a later start joins it", () => {
 test("an agent that starts a few milliseconds before the last one ends still opens the next wave", () => {
 	const kids = [{ start: 0, end: 5_000, done: true }, { start: 4_980, end: 9_000, done: true }];
 	assert.deepEqual(waveStarts(kids, 20_000), [false, true]);
+});
+
+test("waves group the agents that ran together, each keyed by its first agent", () => {
+	const named = (key, startS, endS) => ({ key, ...kid(startS, endS) });
+	const waves = groupWaves([named("a", 0, 8), named("b", 0, 11), named("c", 12, 20), named("d", 12, 15), named("e", 30, 40)], 100_000);
+	assert.deepEqual(waves.map((wave) => [wave.key, wave.agents.map((agent) => agent.key)]), [
+		["a", ["a", "b"]],
+		["c", ["c", "d"]],
+		["e", ["e"]],
+	]);
+	assert.deepEqual(groupWaves([], 0), []);
 });

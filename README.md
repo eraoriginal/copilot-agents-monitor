@@ -38,13 +38,24 @@ it. See [Hooks](#hooks) for what they add and their status.
 
 - **Totals**: cost in AI credits and dollars, wall clock, agents running, tokens in and out,
   cache hit rate, LLM and tool calls.
-- **Orchestration**: the workspace, branch and ticket, then a tree, left to right: the root agent
-  of each turn on the left, the agents it launched stacked on its right, each linked to it by its
-  own line, and the agents those launched in turn further right. Every card says who launched it
-  and how far into that agent's run (`↳ conductor · +20.3s`), with its status (running, done,
-  stalled, failed), model, duration, tokens, cost and last tool call. Agents that ran side by side
-  sit together; a gap marks the next wave, which started once the previous one had finished. Click
-  a card to filter the log and the timeline to that agent.
+- **Orchestration**: the workspace, branch and ticket, then a tree, top to bottom: the root agent
+  of each turn on top, the agents it launched in rows below it, and the agents those launched in
+  turn below them. Every card says who launched it and how far into that agent's run
+  (`↳ conductor · +20.3s`), with its status (running, done, stalled, failed), model, duration,
+  tokens, cost and last tool call. Agents that ran side by side share a row; the next wave, which
+  started once the previous one had finished, opens a new one. Click a card to filter the log and
+  the timeline to that agent.
+
+  Two lines join an agent to the one that launched it, and each has one direction:
+  - **Out**, a solid line from the launcher's bottom-left, down the left side and along the bus
+    above the agent's row, ending in an arrowhead on the agent's card. While the agent works,
+    orange dashes advance along it, toward the agent.
+  - **Back**, a dashed line from the right edge of the agent's card, down beside it, along a bus
+    below its row and up the right side, ending in an arrowhead in the launcher's bottom-right.
+    Faint until the agent is done, then green, with the dashes advancing for a few seconds; red if
+    the agent failed.
+
+  Lines run out on the left and back on the right, so none crosses a card or the other direction.
 - **Progress**: the agent's todo list when one is reported, otherwise subagents done.
 - **Routing**: each agent's model against the ones its `.agent.md` declares — as declared, on a
   fallback, off its list, or no model declared — and what the session would have cost had every
@@ -56,9 +67,9 @@ it. See [Hooks](#hooks) for what they add and their status.
 Sessions from the last two days are listed; the page follows the latest one unless you pick
 another.
 
-The live view moves with the run: a packet travels along the line to an agent when it is launched
-and back when it finishes; the dashes of a line march while the agent it leads to works; a running
-card glows and sweeps, a finished one flashes; totals count up; log lines slide in; the status line
+The live view moves with the run: a packet travels along the outgoing line to an agent when it is
+launched and along its return line when it finishes; a running card glows and sweeps, a finished
+one flashes; totals count up; log lines slide in; the status line
 types the latest event; a dot before each model names its family (Haiku, Sonnet, Opus). Nothing
 moves when the system asks for reduced motion.
 
@@ -189,4 +200,6 @@ npm test
 | `public/app.js` | the page |
 | `public/motion.js` | persistent elements, counting numbers, packets, typing |
 | `public/tree.js` | the orchestration tree: who launched whom, which agents ran together |
+| `public/routes.js` | where the lines between a parent and its agents run: plain geometry |
+| `public/links.js` | measures the cards and draws those lines in one SVG under them |
 | `src/demo.js` | the `--demo` run |

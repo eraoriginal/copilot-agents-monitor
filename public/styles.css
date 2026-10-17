@@ -255,9 +255,9 @@ select {
 		animation: rewrite 0.5s steps(4);
 	}
 
-	.child.running::before,
-	.children.flowing::before {
-		animation: march-across 0.7s linear infinite;
+	.links .run:not(.stalled),
+	.links .ret.returning {
+		animation: advance 0.8s linear infinite;
 	}
 
 	.bar-fill,
@@ -328,9 +328,13 @@ select {
 	}
 }
 
-@keyframes march-across {
+/* The dashes move one period along their line; --off is where each line's pattern starts. */
+@keyframes advance {
+	from {
+		stroke-dashoffset: var(--off, 0px);
+	}
 	to {
-		background-position: 8px 0;
+		stroke-dashoffset: calc(var(--off, 0px) - 10px);
 	}
 }
 
@@ -452,182 +456,173 @@ main {
 	text-overflow: ellipsis;
 }
 
-/* Orchestration: a tree, left to right. A parent card sits on the left, the agents it launched
-   stack on the right, and each link is drawn by the child it leads to, so a line always ends on a card. */
+/* Orchestration: a tree, top to bottom. A parent card sits on top; the agents it launched lie in
+   rows below it, one wave per group of rows. The lines between them are an SVG drawn by links.js. */
 
 #flow {
 	position: relative;
 	overflow-x: auto;
-	--stub: 28px;
+	--rail: 30px;
+	--lane: 18px;
 	--edge: var(--line-strong);
-	--wave: 16px;
+}
+
+.flow-body {
+	position: relative;
+	z-index: 1;
 }
 
 .turns {
 	display: flex;
 	flex-direction: column;
-	gap: 22px;
+	gap: 28px;
 	min-width: 0;
 }
 
 .turn + .turn {
-	padding-top: 18px;
+	padding-top: 24px;
 	border-top: 1px solid var(--line);
 }
 
 .node {
 	display: flex;
-	align-items: center;
+	flex-direction: column;
+	align-items: stretch;
 	min-width: 0;
 }
 
 .slot {
-	flex: 0 0 var(--slot-width, 230px);
 	min-width: 0;
-}
-
-.turn > .node.leaf > .slot {
-	flex: 0 1 460px;
-}
-
-.child > .node.leaf > .slot {
-	flex: 1 1 auto;
-	min-width: 200px;
-	max-width: 620px;
-}
-
-.child > .node:not(.leaf) {
-	--slot-width: 210px;
 }
 
 .slot > .card {
 	width: 100%;
 }
 
-.children {
-	position: relative;
-	flex: 1 1 0;
-	/* A deep tree scrolls sideways rather than squeeze its cards. */
-	min-width: calc(var(--stub) + 200px);
-	margin-left: var(--stub);
+/* A parent is a centred card; a child with agents of its own is too, and spans its whole row. */
+.turn > .node > .slot,
+.cell.has-kids > .node > .slot {
+	width: min(100%, 380px);
+	align-self: center;
+}
+
+/* The children block: room above for the first bus, and a gutter each side for the rails. */
+.kids {
+	margin-top: 56px;
+	padding: 0 var(--rail);
 	display: flex;
 	flex-direction: column;
+	gap: 76px;
+	min-width: 0;
 }
 
-/* From the parent card to the trunk. */
-.children::before {
-	content: "";
-	position: absolute;
-	left: calc(-1 * var(--stub));
-	top: 50%;
-	width: var(--stub);
-	height: 1px;
-	background: var(--edge);
+/* Agents that ran side by side. Rows and waves are spaced for the buses that run between them. */
+.wave {
+	display: grid;
+	/* Flexible tracks: the browser counts columns by their minimum, so three fit where a capped
+	   maximum would have allowed two. Empty tracks collapse, and a lone card stays centred. */
+	grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+	gap: 64px var(--lane);
+	align-items: start;
 }
 
-.child {
-	position: relative;
-	padding: 5px 0 5px var(--stub);
+.cell {
+	min-width: 0;
+	width: 100%;
+	max-width: 260px;
+	justify-self: center;
 }
 
-/* Agents that did not run alongside the previous ones: a gap sets the waves apart. */
-.child.wave-start {
-	margin-top: var(--wave);
+/* An agent with agents of its own takes a whole row, so that they have the room below it. */
+.cell.has-kids {
+	grid-column: 1 / -1;
+	max-width: none;
+	justify-self: stretch;
 }
 
-.child:first-child {
-	margin-top: 0;
-}
-
-/* From the trunk to the child card. */
-.child::before {
-	content: "";
-	position: absolute;
-	left: 0;
-	top: 50%;
-	width: var(--stub);
-	height: 1px;
-	background: var(--edge);
-}
-
-/* The trunk: one segment per child, joined end to end. */
-.child::after {
-	content: "";
+.links {
 	position: absolute;
 	left: 0;
 	top: 0;
-	bottom: 0;
 	width: 1px;
-	background: var(--edge);
+	height: 1px;
+	overflow: visible;
+	pointer-events: none;
+	z-index: 0;
 }
 
-.child:first-child::after {
-	top: 50%;
+.links path {
+	fill: none;
+	stroke-width: 1.4;
+	stroke-linejoin: round;
 }
 
-.child:last-child::after {
-	bottom: 50%;
+/* Out: a solid line, an arrowhead on the card it leads to. */
+.links .launch {
+	stroke: var(--edge);
+	marker-start: url(#dot-idle);
+	marker-end: url(#arrow-idle);
 }
 
-.child:only-child::after {
-	display: none;
+/* While the agent works: dashes advance toward it over the solid line, so the route has no gap. */
+.links .run {
+	stroke: var(--accent);
+	stroke-dasharray: 6 4;
+	stroke-dashoffset: var(--off, 0px);
+	marker-start: url(#dot-run);
+	marker-end: url(#arrow-run);
 }
 
-.child.wave-start:not(:first-child)::after {
-	top: calc(-1 * var(--wave));
+.links .run.stalled {
+	stroke: var(--warning);
+	marker-start: url(#dot-warn);
+	marker-end: url(#arrow-warn);
 }
 
-/* A link lights up, in the direction of the work, while the agent it leads to runs. */
-.child.running::before,
-.children.flowing::before {
-	background: repeating-linear-gradient(90deg, var(--accent) 0 4px, transparent 4px 8px);
+/* Back: dashes out of the agent, an arrowhead in its parent. */
+.links .ret {
+	stroke: var(--edge);
+	stroke-dasharray: 6 4;
+	stroke-dashoffset: var(--off, 0px);
+	marker-start: url(#dot-idle);
+	marker-end: url(#arrow-idle);
 }
 
-.child.running::before {
-	height: 2px;
-	margin-top: -0.5px;
+.links .ret.done {
+	stroke: var(--good);
+	marker-start: url(#dot-done);
+	marker-end: url(#arrow-done);
 }
 
-@media (max-width: 700px) {
-	/* Narrow: each parent sits above its children, which indent under it; the trunk starts at the card. */
-	.node {
-		flex-direction: column;
-		align-items: stretch;
-	}
+.links .ret.failed {
+	stroke: var(--critical);
+	marker-start: url(#dot-fail);
+	marker-end: url(#arrow-fail);
+}
 
-	.slot,
-	.turn > .node.leaf > .slot,
-	.child > .node.leaf > .slot {
-		flex: none;
-		max-width: none;
-	}
+.links .tone-idle path,
+.links .tone-idle circle {
+	fill: var(--edge);
+}
 
-	.children {
-		flex: none;
-		min-width: 0;
-		margin-left: 18px;
-	}
+.links .tone-run path,
+.links .tone-run circle {
+	fill: var(--accent);
+}
 
-	.children::before {
-		display: none;
-	}
+.links .tone-warn path,
+.links .tone-warn circle {
+	fill: var(--warning);
+}
 
-	.child {
-		padding-left: 22px;
-	}
+.links .tone-done path,
+.links .tone-done circle {
+	fill: var(--good);
+}
 
-	.child::before {
-		width: 22px;
-	}
-
-	.child:first-child::after {
-		top: 0;
-	}
-
-	.child:only-child::after {
-		display: block;
-		bottom: 50%;
-	}
+.links .tone-fail path,
+.links .tone-fail circle {
+	fill: var(--critical);
 }
 
 .card {

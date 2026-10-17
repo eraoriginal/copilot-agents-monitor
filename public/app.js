@@ -9,7 +9,8 @@ import {
 } from "./format.js";
 import { createStore, deriveSession, ingest } from "./model.js";
 import { countTo, flash, motionAllowed, reconcile, sendPacket, typeInto } from "./motion.js";
-import { childrenOf, launchOf, waveStarts } from "./tree.js";
+import { createLinkLayer } from "./links.js";
+import { childrenOf, groupWaves, launchOf } from "./tree.js";
 import { counterfactual, routingFor } from "./routing.js";
 import { definitionsOf, placeOf } from "./workspaces.js";
 
@@ -279,7 +280,11 @@ function updateCard(card, agent, isNew) {
 	card.classList.toggle("selected", selected);
 	card.setAttribute("aria-pressed", String(selected));
 	if (isNew && ui.animateFlow) flash(card, "entering");
-	if (card._status === "running" && agent.status === "done") flash(card, "just-done");
+	if (card._status === "running" && agent.status === "done") {
+		flash(card, "just-done");
+		// Remembered, so that its return line advances for a few seconds.
+		card._doneAt = performance.now();
+	}
 	card._status = agent.status;
 
 	refs.name.textContent = agent.unnamed ? `${agent.label} · identifying…` : agent.label;
@@ -337,20 +342,25 @@ function updateCard(card, agent, isNew) {
 	}
 }
 
-/** One node of the tree: a card, and the column of the agents it launched. */
+/** One node of the tree: a card and, below it, the agents it launched, a wave at a time. */
 function createNode() {
 	const node = el("div", { class: "node" });
-	node._refs = { slot: el("div", { class: "slot" }), children: el("div", { class: "children" }) };
-	node.append(node._refs.slot, node._refs.children);
+	node._refs = { slot: el("div", { class: "slot" }), kids: el("div", { class: "kids" }) };
+	node.append(node._refs.slot, node._refs.kids);
 	return node;
 }
 
-/** A child in its parent's column: it owns the link that leads to it. */
-function createChild() {
-	const child = el("div", { class: "child" });
-	child._node = createNode();
-	child.append(child._node);
-	return child;
+/** Agents that ran side by side: a row, or several when they do not fit. */
+function createWave() {
+	return el("div", { class: "wave" });
+}
+
+/** An agent in a wave: its card and, below it, the agents it launched in turn. */
+function createCell() {
+	const cell = el("div", { class: "cell" });
+	cell._node = createNode();
+	cell.append(cell._node);
+	return cell;
 }
 
 function createTurn() {
@@ -376,53 +386,38 @@ function updateNode(node, view, agent, now) {
 		reconcile(refs.slot, [agent], (item) => item.key, createCard, updateCard);
 	}
 	node.classList.toggle("leaf", kids.length === 0);
-	refs.children.hidden = kids.length === 0;
-	refs.children.classList.toggle("flowing", running > 0);
+	refs.kids.hidden = kids.length === 0;
 
-	const opens = waveStarts(kids, now);
-	for (const [index, kid] of kids.entries()) {
+	for (const kid of kids) {
 		const { launcher, offset } = launchOf(agent, kid);
 		kid._launcher = launcher;
 		kid._offset = offset;
-		kid._wave = opens[index];
 	}
-	reconcile(refs.children, kids, (kid) => kid.key, createChild, (child, kid) => {
-		child.classList.toggle("running", kid.status === "running");
-		child.classList.toggle("wave-start", kid._wave);
-		updateNode(child._node, view, kid, now);
-	});
+	reconcile(refs.kids, groupWaves(kids, now), (wave) => wave.key, createWave, (waveElement, wave) =>
+		reconcile(waveElement, wave.agents, (kid) => kid.key, createCell, (cell, kid) => {
+			// An agent with agents of its own takes a whole row, so that they have the room below it.
+			cell.classList.toggle("has-kids", kid.children.some((key) => view.agents.has(key)));
+			updateNode(cell._node, view, kid, now);
+		}),
+	);
 }
 
 /** Remembers, per session, what each agent was at the last render: packets fly on changes only. */
 const flowMemory = { sessionId: null, agents: new Map() };
 
-/** The path of a link, in page coordinates: out of the parent, along the trunk, into the child. */
-function linkPoints(parentCard, childCard) {
-	const a = parentCard.getBoundingClientRect();
-	const b = childCard.getBoundingClientRect();
-	const trunkX = childCard.closest(".child").getBoundingClientRect().left;
-	const endY = b.top + b.height / 2;
-	if (trunkX >= a.right - 1) {
-		const startY = a.top + a.height / 2;
-		return [
-			{ x: a.right, y: startY },
-			{ x: trunkX, y: startY },
-			{ x: trunkX, y: endY },
-			{ x: b.left, y: endY },
-		];
-	}
-	// Narrow layout: the trunk runs down from the parent's foot.
-	return [
-		{ x: trunkX, y: a.bottom },
-		{ x: trunkX, y: endY },
-		{ x: b.left, y: endY },
-	];
-}
+const flow = $("flow");
+const flowBody = el("div", { class: "flow-body" });
+flow.replaceChildren(flowBody);
+const linkLayer = createLinkLayer(flow);
+// The lines follow the layout: a resized panel moves every card.
+new ResizeObserver(() => {
+	if (flowMemory.sessionId) linkLayer.update();
+}).observe(flowBody);
 
 function renderFlow(view) {
-	const flow = $("flow");
 	if (!view) {
-		flow.replaceChildren(setupPanel());
+		flowBody.replaceChildren(setupPanel());
+		linkLayer.clear();
 		$("flow-meta").textContent = "";
 		flowMemory.sessionId = null;
 		return;
@@ -441,14 +436,15 @@ function renderFlow(view) {
 	if (!sameSession) {
 		flowMemory.sessionId = view.id;
 		flowMemory.agents = new Map();
-		flow.replaceChildren();
+		flowBody.replaceChildren();
+		linkLayer.clear();
 	}
 	// Cards and packets animate for what happens now, not for a session being opened.
 	ui.animateFlow = sameSession;
-	let turns = flow.querySelector(":scope > .turns");
+	let turns = flowBody.querySelector(":scope > .turns");
 	if (!turns) {
 		turns = el("div", { class: "turns" });
-		flow.replaceChildren(turns);
+		flowBody.replaceChildren(turns);
 	}
 
 	const now = Date.now();
@@ -457,33 +453,32 @@ function renderFlow(view) {
 	if (orphans.length) items.push({ key: "orphans", virtual: true, children: orphans.map((agent) => agent.key), start: orphans[0].start });
 	reconcile(turns, items, (item) => item.key, createTurn, (turn, item) => updateNode(turn._node, view, item, now));
 
-	// Packets: a brief down each link to a new subagent, a result back up from one that finished.
+	// The lines are drawn once the cards are in place.
+	const routes = linkLayer.update();
+
+	// Packets: one goes out along the launch line to a new subagent, one comes back along its
+	// return line when it finishes.
 	const packets = [];
 	for (const agent of view.agents.values()) {
 		if (agent.root || !agent.parentKey) continue;
 		const before = flowMemory.agents.get(agent.key);
-		if (sameSession && !before) packets.push({ agent, up: false });
-		else if (sameSession && before === "running" && agent.status === "done") packets.push({ agent, up: true });
+		if (sameSession && !before) packets.push({ agent, back: false });
+		else if (sameSession && before === "running" && agent.status === "done") packets.push({ agent, back: true });
 	}
 	for (const agent of view.agents.values()) flowMemory.agents.set(agent.key, agent.status);
 	if (packets.length > 0 && packets.length <= 8 && motionAllowed()) {
-		requestAnimationFrame(() => {
-			const cardOf = (key) => flow.querySelector(`button.card[data-key="${CSS.escape(key)}"]`);
-			for (const [index, { agent, up }] of packets.entries()) {
-				const parentCard = cardOf(agent.parentKey);
-				const childCard = cardOf(agent.key);
-				if (!parentCard || !childCard) continue;
-				setTimeout(
-					() =>
-						sendPacket(flow, linkPoints(parentCard, childCard), {
-							label: up ? `${agent.label} ✓` : `→ ${agent.unnamed ? "new subagent" : agent.label}`,
-							tone: up ? "good" : "accent",
-							up,
-						}),
-					index * 140,
-				);
-			}
-		});
+		for (const [index, { agent, back }] of packets.entries()) {
+			const route = routes.get(agent.key);
+			if (!route) continue;
+			setTimeout(
+				() =>
+					sendPacket(flow, back ? route.ret : route.launch, {
+						label: back ? `${agent.label} ✓` : `→ ${agent.unnamed ? "new subagent" : agent.label}`,
+						tone: back ? "good" : "accent",
+					}),
+				index * 140,
+			);
+		}
 	}
 }
 

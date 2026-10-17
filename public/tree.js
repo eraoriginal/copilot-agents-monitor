@@ -27,6 +27,17 @@ export function waveStarts(kids, now) {
 	});
 }
 
+/** The agents of `kids` split into waves, in order: each wave is a list of agents that ran together. */
+export function groupWaves(kids, now) {
+	const opens = waveStarts(kids, now);
+	const waves = [];
+	for (const [index, kid] of kids.entries()) {
+		if (index === 0 || opens[index]) waves.push({ key: kid.key, agents: [] });
+		waves.at(-1).agents.push(kid);
+	}
+	return waves;
+}
+
 /** Who launched `kid` and how far into its own run: `parent` is the agent that launched it. */
 export function launchOf(parent, kid) {
 	if (!parent || parent.virtual) return { launcher: null, offset: "" };
