@@ -52,6 +52,12 @@ it. See [Hooks](#hooks) for what they add and their status.
 Sessions from the last two days are listed; the page follows the latest one unless you pick
 another.
 
+The live view moves with the run: a packet travels down the connector when the root agent
+delegates and back up when a subagent finishes; the dashes march while subagents work; a running
+card glows and sweeps, a finished one flashes; totals count up; log lines slide in; the status line
+types the latest event; a dot before each model names its family (Haiku, Sonnet, Opus). Nothing
+moves when the system asks for reduced motion.
+
 **History**, every session since the monitor first ran, by workspace and period:
 
 - **Tickets**: sessions grouped by the ticket key in their branch name (`feat/FRCLM-46-…` →
@@ -177,4 +183,5 @@ npm test
 | `public/routing.js` | agent files, the routing check, the routing comparison |
 | `public/workspaces.js` | a session's workspace, branch and ticket |
 | `public/app.js` | the page |
+| `public/motion.js` | persistent elements, counting numbers, packets, typing |
 | `src/demo.js` | the `--demo` run |

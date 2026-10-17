@@ -8,6 +8,7 @@ import {
 	shortModel,
 } from "./format.js";
 import { createStore, deriveSession, ingest } from "./model.js";
+import { countTo, flash, motionAllowed, reconcile, sendPacket, typeInto } from "./motion.js";
 import { counterfactual, routingFor } from "./routing.js";
 import { definitionsOf, placeOf } from "./workspaces.js";
 
@@ -58,10 +59,6 @@ function replace(id, ...children) {
 
 const STATUS_MARK = { running: "●", done: "✓", stalled: "!", failed: "✕" };
 
-function statusChip(status) {
-	return el("span", { class: `status ${status}` }, `${STATUS_MARK[status] ?? "·"} ${status}`);
-}
-
 // ---------------------------------------------------------------------------------------------
 // Sessions.
 
@@ -102,27 +99,42 @@ function renderSessionPicker(views) {
 // ---------------------------------------------------------------------------------------------
 // Panels.
 
+/** Output tokens per second over the last minute: how fast the agents are writing. */
+function throughput(view, now) {
+	let tokens = 0;
+	for (const agent of view.agents.values()) {
+		for (const call of agent.calls) if (now - (call.end ?? 0) < 60_000) tokens += call.usage.output;
+	}
+	return tokens / 60;
+}
+
+// The indicator keeps its elements: rebuilt every second, the dot's pulse would restart each time.
+const liveDot = el("span", { class: "dot" });
+const liveText = el("span");
+$("live").replaceChildren(liveDot, liveText);
+
 function renderLive(view, now) {
 	const lag = store.lastLagMs != null ? ` · lag ${formatDuration(Math.max(0, store.lastLagMs))}` : "";
+	let tone = "";
+	let text;
 	if (!ui.connected) {
-		replace("live", el("span", { class: "dot bad" }), "monitor disconnected — retrying");
-		return;
-	}
-	if (!view) {
-		replace("live", el("span", { class: "dot" }), "waiting for the first event");
-		return;
-	}
-	if (view.live) {
-		replace("live", el("span", { class: "dot on" }), `LIVE · ${view.running.length} running${lag}`);
+		tone = "bad";
+		text = "monitor disconnected — retrying";
+	} else if (!view) {
+		text = "waiting for the first event";
+	} else if (view.live) {
+		tone = "on";
+		const rate = throughput(view, now);
+		text = `LIVE · ${view.running.length} running${rate >= 1 ? ` · ${Math.round(rate)} tok/s` : ""}${lag}`;
 	} else if (view.waitingForUser) {
-		replace("live", el("span", { class: "dot on" }), "waiting for your answer");
+		tone = "on";
+		text = "waiting for your answer";
 	} else {
-		replace(
-			"live",
-			el("span", { class: "dot" }),
-			`idle · last activity ${formatDuration(now - view.lastActivityAt)} ago${lag}`,
-		);
+		text = `idle · last activity ${formatDuration(now - view.lastActivityAt)} ago${lag}`;
 	}
+	const className = `dot${tone ? ` ${tone}` : ""}`;
+	if (liveDot.className !== className) liveDot.className = className;
+	liveText.textContent = text;
 }
 
 function kpi(label, value, sub, accent = false) {
@@ -135,9 +147,43 @@ function kpi(label, value, sub, accent = false) {
 	);
 }
 
+/** The live tiles keep their elements, so a value counts up to the next one instead of jumping. */
+const liveTiles = (() => {
+	const tiles = {};
+	const specs = [
+		["cost", "cost", true],
+		["wall", "wall clock"],
+		["agents", "agents"],
+		["tokens", "tokens"],
+		["cache", "cache"],
+		["calls", "llm calls"],
+		["tools", "tool calls"],
+	];
+	$("kpis").replaceChildren(
+		...specs.map(([key, label, accent]) => {
+			const value = el("div", { class: `kpi-value${accent ? " accent" : ""}` }, "—");
+			const sub = el("div", { class: "kpi-sub" });
+			tiles[key] = { value, sub };
+			return el("div", { class: "kpi" }, el("div", { class: "kpi-label" }, label), value, sub);
+		}),
+	);
+	return tiles;
+})();
+
+function setTile(key, value, sub, format) {
+	const tile = liveTiles[key];
+	if (format) countTo(tile.value, value, format);
+	else {
+		tile.value._value = null;
+		tile.value.textContent = value;
+	}
+	tile.sub.textContent = sub;
+	tile.sub.title = sub;
+}
+
 function renderKpis(view) {
 	if (!view) {
-		replace("kpis", kpi("cost", "—", "no session yet"));
+		for (const key of Object.keys(liveTiles)) setTile(key, "—", key === "cost" ? "no session yet" : "");
 		return;
 	}
 	const t = view.totals;
@@ -147,20 +193,18 @@ function renderKpis(view) {
 			? `≈ ${formatUsd(t.usd)} · estimated from list prices`
 			: `≈ ${formatUsd(t.usd)} · billed by Copilot`;
 	const parallel = maxParallel(view.subagents);
-	replace(
-		"kpis",
-		kpi("cost", formatCredits(t.credits), costSub, true),
-		kpi("wall clock", formatDuration(view.wallMs), `${view.turns} turn${view.turns === 1 ? "" : "s"}`),
-		kpi(
-			"agents",
-			`${view.running.length} / ${view.agents.size}`,
-			`running / total · ${parallel} max in parallel`,
-		),
-		kpi("tokens", `${formatTokens(t.input)} in`, `${formatTokens(t.output)} out · ${formatTokens(t.reasoning)} reasoning`),
-		kpi("cache", formatPercent(t.cacheRead, t.input), `${formatTokens(t.cacheRead)} read · ${formatTokens(t.cacheWrite)} written`),
-		kpi("llm calls", String(t.calls), `${view.byModel.size} model${view.byModel.size === 1 ? "" : "s"}`),
-		kpi("tool calls", String(view.toolCount), view.prompt ? `“${view.prompt.slice(0, 60)}”` : view.cwd ?? ""),
+	setTile("cost", t.credits, costSub, formatCredits);
+	setTile("wall", formatDuration(view.wallMs), `${view.turns} turn${view.turns === 1 ? "" : "s"}`);
+	setTile("agents", `${view.running.length} / ${view.agents.size}`, `running / total · ${parallel} max in parallel`);
+	setTile("tokens", t.input, `${formatTokens(t.output)} out · ${formatTokens(t.reasoning)} reasoning`, (n) => `${formatTokens(Math.round(n))} in`);
+	setTile(
+		"cache",
+		t.input ? (t.cacheRead / t.input) * 100 : 0,
+		`${formatTokens(t.cacheRead)} read · ${formatTokens(t.cacheWrite)} written`,
+		(n) => (t.input ? `${Math.round(n)}%` : "—"),
 	);
+	setTile("calls", t.calls, `${view.byModel.size} model${view.byModel.size === 1 ? "" : "s"}`, (n) => String(Math.round(n)));
+	setTile("tools", view.toolCount, view.prompt ? `“${view.prompt.slice(0, 60)}”` : view.cwd ?? "", (n) => String(Math.round(n)));
 }
 
 function maxParallel(agents) {
@@ -188,74 +232,120 @@ const ROUTING_LABEL = {
 	unknown: ["muted", "?", "no agent file"],
 };
 
-function agentCard(view, agent) {
+/** The model family a badge's dot shows: Haiku finds, Sonnet builds, Opus decides. */
+function modelFamily(model) {
+	return /opus|fable|mythos/i.test(model) ? "opus" : /sonnet/i.test(model) ? "sonnet" : /haiku/i.test(model) ? "haiku" : "other";
+}
+
+function createCard() {
+	const refs = {
+		name: el("span", { class: "card-name" }),
+		status: el("span", { class: "status" }),
+		models: el("span", { class: "card-models" }),
+		duration: el("span"),
+		tokens: el("span"),
+		cost: el("span", { class: "card-cost" }),
+		foot: el("div", { class: "card-foot" }),
+	};
+	const card = el(
+		"button",
+		{ type: "button", class: "card" },
+		el("div", { class: "card-top" }, refs.name, refs.status),
+		el("div", { class: "card-line" }, refs.models, refs.duration),
+		el("div", { class: "card-line" }, refs.tokens, refs.cost),
+		refs.foot,
+		el("div", { class: "card-activity", "aria-hidden": "true" }),
+	);
+	card._refs = refs;
+	card.addEventListener("click", () => {
+		ui.agentKey = ui.agentKey === card.dataset.key ? null : card.dataset.key;
+		scheduleRender(true);
+	});
+	return card;
+}
+
+function updateCard(card, agent, isNew) {
+	const refs = card._refs;
 	const routing = ui.routing.find((row) => row.name === agent.name);
 	const flagged = routing && (routing.status === "fallback" || routing.status === "off-list");
-	const models = [...agent.models].map((model) =>
-		el(
-			"span",
-			{
-				class: `badge${flagged ? " warn" : ""}`,
-				title: flagged ? `${ROUTING_LABEL[routing.status][2]} · declared: ${routing.declared.join(", ")}` : model,
-			},
-			shortModel(model),
-		),
-	);
+	const selected = ui.agentKey === agent.key;
+
+	// classList, not className: a one-shot animation class may be running on the card.
+	for (const status of Object.keys(STATUS_MARK)) card.classList.toggle(status, agent.status === status);
+	card.classList.toggle("selected", selected);
+	card.setAttribute("aria-pressed", String(selected));
+	if (isNew && ui.animateFlow) flash(card, "entering");
+	if (card._status === "running" && agent.status === "done") flash(card, "just-done");
+	card._status = agent.status;
+
+	refs.name.textContent = agent.root
+		? `${agent.label} · turn ${agent.turn}`
+		: agent.unnamed
+			? `${agent.label} · identifying…`
+			: agent.label;
+	refs.status.className = `status ${agent.status}`;
+	refs.status.textContent = `${STATUS_MARK[agent.status] ?? "·"} ${agent.status}`;
+
+	const models = [...agent.models];
+	const signature = `${models.join("|")}|${flagged ? routing.status : ""}`;
+	if (refs.models.dataset.signature !== signature) {
+		refs.models.dataset.signature = signature;
+		refs.models.replaceChildren(
+			...(models.length
+				? models.map((model) =>
+						el(
+							"span",
+							{
+								class: `badge m-${modelFamily(model)}${flagged ? " warn" : ""}`,
+								title: flagged ? `${ROUTING_LABEL[routing.status][2]} · declared: ${routing.declared.join(", ")}` : model,
+							},
+							shortModel(model),
+						),
+					)
+				: [el("span", { class: "muted" }, agent.root && !agent.done ? "LLM calls reported at turn end" : "no model yet")]),
+		);
+	}
+	refs.duration.textContent = formatDuration(agent.durationMs);
 	const t = agent.totals;
+	refs.tokens.textContent = `${formatTokens(t.input)} in · ${formatTokens(t.output)} out`;
+	if (t.priced || t.credits) countTo(refs.cost, t.credits, formatCredits);
+	else refs.cost.textContent = "—";
 	const last = agent.lastTool
 		? `last ${agent.lastTool.name}${agent.lastTool.summary ? ` · ${agent.lastTool.summary}` : ""}${agent.lastTool.permission ? ` · ${agent.lastTool.permission}` : ""}`
 		: null;
 	const foot = [`${agent.toolCount} tool${agent.toolCount === 1 ? "" : "s"}`, agent.brief ?? last ?? agent.description]
 		.filter(Boolean)
 		.join(" · ");
-	const selected = ui.agentKey === agent.key;
-	return el(
-		"button",
-		{
-			type: "button",
-			class: `card ${agent.status}${selected ? " selected" : ""}`,
-			"aria-pressed": selected ? "true" : "false",
-			onclick: () => {
-				ui.agentKey = selected ? null : agent.key;
-				scheduleRender(true);
-			},
-		},
-		el(
-			"div",
-			{ class: "card-top" },
-			el(
-				"span",
-				{ class: "card-name" },
-				agent.root ? `${agent.label} · turn ${agent.turn}` : agent.unnamed ? `${agent.label} · identifying…` : agent.label,
-			),
-			statusChip(agent.status),
-		),
-		el(
-			"div",
-			{ class: "card-line" },
-			el(
-				"span",
-				{},
-				models.length
-					? models
-					: el("span", { class: "muted" }, agent.root && !agent.done ? "LLM calls reported at turn end" : "no model yet"),
-			),
-			el("span", {}, formatDuration(agent.durationMs)),
-		),
-		el(
-			"div",
-			{ class: "card-line" },
-			el("span", {}, `${formatTokens(t.input)} in · ${formatTokens(t.output)} out`),
-			el("span", { class: "card-cost" }, t.priced || t.credits ? formatCredits(t.credits) : "—"),
-		),
-		el("div", { class: "card-foot", title: foot }, foot),
-	);
+	if (refs.foot.textContent !== foot) {
+		refs.foot.textContent = foot;
+		refs.foot.title = foot;
+		// A new tool call: the line flickers, as a terminal line being rewritten.
+		if (!isNew && agent.status === "running") flash(refs.foot, "rewritten");
+	}
 }
 
-function renderFlow(view, now) {
+function createTurn() {
+	const turn = el("div", { class: "turn" });
+	turn._refs = {
+		root: el("div", { class: "root-row" }),
+		connector: el("div", { class: "connector" }),
+		label: el("span", { class: "connector-label" }),
+		children: el("div", { class: "children" }),
+	};
+	turn._refs.connector.append(turn._refs.label);
+	turn.append(turn._refs.root, turn._refs.connector, turn._refs.children);
+	return turn;
+}
+
+/** Remembers, per session, what each agent was at the last render: packets fly on changes only. */
+const flowMemory = { sessionId: null, agents: new Map() };
+
+function renderFlow(view) {
+	const flow = $("flow");
 	if (!view) {
-		replace("flow", setupPanel());
+		flow.replaceChildren(setupPanel());
 		$("flow-meta").textContent = "";
+		flowMemory.sessionId = null;
 		return;
 	}
 	const place = ui.place;
@@ -267,45 +357,68 @@ function renderFlow(view, now) {
 	]
 		.filter(Boolean)
 		.join(" · ");
-	const turns = view.rootAgents.map((root) => {
-		const children = root.children
+
+	const sameSession = flowMemory.sessionId === view.id;
+	if (!sameSession) {
+		flowMemory.sessionId = view.id;
+		flowMemory.agents = new Map();
+		flow.replaceChildren();
+	}
+	// Cards and packets animate for what happens now, not for a session being opened.
+	ui.animateFlow = sameSession;
+	let turns = flow.querySelector(":scope > .turns");
+	if (!turns) {
+		turns = el("div", { class: "turns" });
+		flow.replaceChildren(turns);
+	}
+
+	const groups = view.rootAgents.map((root) => ({
+		root,
+		children: root.children
 			.map((key) => view.agents.get(key))
 			.filter(Boolean)
-			.sort((x, y) => x.start - y.start);
+			.sort((x, y) => x.start - y.start),
+	}));
+	reconcile(turns, groups, (group) => group.root.key, createTurn, (turn, { root, children }) => {
+		const refs = turn._refs;
+		reconcile(refs.root, [root], (agent) => agent.key, createCard, updateCard);
 		const running = children.filter((child) => child.status === "running").length;
-		return el(
-			"div",
-			{ class: "turn" },
-			el("div", { class: "root-row" }, agentCard(view, root)),
-			children.length
-				? [
-						el(
-							"div",
-							{ class: "connector" },
-							el(
-								"span",
-								{ class: "connector-label" },
-								`${children.length} delegated · ${maxParallel(children)} in parallel${running ? ` · ${running} running` : ""}`,
-							),
-						),
-						el("div", { class: "children" }, children.map((child) => agentCard(view, child))),
-					]
-				: null,
-		);
+		refs.connector.hidden = children.length === 0;
+		refs.connector.classList.toggle("flowing", running > 0);
+		refs.label.textContent = `${children.length} delegated · ${maxParallel(children)} in parallel${running ? ` · ${running} running` : ""}`;
+		reconcile(refs.children, children, (agent) => agent.key, createCard, updateCard);
 	});
-	const orphans = view.subagents.filter((agent) => !agent.parentKey);
-	if (orphans.length) {
-		turns.push(
-			el(
-				"div",
-				{ class: "turn" },
-				el("div", { class: "empty-note" }, "subagents whose caller has not reported yet"),
-				el("div", { class: "children" }, orphans.map((agent) => agentCard(view, agent))),
-			),
-		);
+
+	// Packets: a brief down to each new subagent, a result back up from each one that finished.
+	const packets = [];
+	for (const { root, children } of groups) {
+		for (const child of children) {
+			const before = flowMemory.agents.get(child.key);
+			if (sameSession && !before) packets.push({ root, child, up: false });
+			else if (sameSession && before === "running" && child.status === "done") packets.push({ root, child, up: true });
+		}
 	}
-	replace("flow", el("div", { class: "turns" }, turns));
-	void now;
+	for (const agent of view.agents.values()) flowMemory.agents.set(agent.key, agent.status);
+	if (packets.length > 0 && packets.length <= 8 && motionAllowed()) {
+		requestAnimationFrame(() => {
+			for (const [index, { root, child, up }] of packets.entries()) {
+				const rootCard = turns.querySelector(`.root-row [data-key="${CSS.escape(root.key)}"]`);
+				const childCard = turns.querySelector(`.children [data-key="${CSS.escape(child.key)}"]`);
+				const connector = rootCard?.closest(".turn")?._refs.connector;
+				if (!rootCard || !childCard) continue;
+				setTimeout(
+					() =>
+						sendPacket(flow, rootCard, childCard, {
+							label: up ? `${child.label} ✓` : `→ ${child.unnamed ? "new subagent" : child.label}`,
+							tone: up ? "good" : "accent",
+							viaY: connector?.getBoundingClientRect().bottom,
+							up,
+						}),
+					index * 140,
+				);
+			}
+		});
+	}
 }
 
 function setupPanel() {
@@ -343,45 +456,70 @@ function setupPanel() {
 	);
 }
 
+/** The progress panel keeps its bar and its list, so the bar slides and a step lights up. */
+const progressParts = (() => {
+	const parts = {
+		headline: el("div"),
+		fill: el("div", { class: "progress-fill" }),
+		list: el("ul", { class: "todos" }),
+		note: el("div", { class: "empty-note" }),
+	};
+	parts.track = el("div", { class: "progress-track" }, parts.fill);
+	$("progress").replaceChildren(parts.headline, parts.track, parts.list, parts.note);
+	return parts;
+})();
+
+const TODO_MARK = { completed: "[x]", "in-progress": "[>]", pending: "[ ]" };
+
+function todoState(status) {
+	return /complete|done/i.test(status) ? "completed" : /progress|active/i.test(status) ? "in-progress" : "pending";
+}
+
 function renderProgress(view) {
+	const parts = progressParts;
 	if (!view) {
-		replace("progress", el("div", { class: "empty-note" }, "—"));
+		parts.headline.textContent = "—";
+		parts.track.hidden = true;
+		parts.list.replaceChildren();
+		parts.note.textContent = "";
 		return;
 	}
+	let done;
+	let total;
 	if (view.todos) {
-		const done = view.todos.filter((todo) => /complete|done/i.test(todo.status)).length;
-		replace(
-			"progress",
-			el("div", {}, `${done} of ${view.todos.length} steps done`),
-			el("div", { class: "progress-track" }, el("div", { class: "progress-fill", style: { width: `${(done / view.todos.length) * 100}%` } })),
-			el(
-				"ul",
-				{ class: "todos" },
-				view.todos.map((todo) => {
-					const state = /complete|done/i.test(todo.status) ? "completed" : /progress|active/i.test(todo.status) ? "in-progress" : "pending";
-					const mark = { completed: "[x]", "in-progress": "[>]", pending: "[ ]" }[state];
-					return el("li", { class: state }, el("span", { class: "todo-mark" }, mark), el("span", {}, todo.title));
-				}),
-			),
+		total = view.todos.length;
+		done = view.todos.filter((todo) => todoState(todo.status) === "completed").length;
+		parts.headline.textContent = `${done} of ${total} steps done`;
+		reconcile(
+			parts.list,
+			view.todos,
+			(todo) => todo.title,
+			() => {
+				const item = el("li", {}, el("span", { class: "todo-mark" }), el("span", { class: "todo-title" }));
+				return item;
+			},
+			(item, todo) => {
+				const state = todoState(todo.status);
+				if (item._state && item._state !== state) flash(item, "step-changed");
+				item._state = state;
+				item.className = state;
+				item.firstChild.textContent = TODO_MARK[state];
+				item.lastChild.textContent = todo.title;
+			},
 		);
-		return;
+		parts.note.textContent = "";
+	} else {
+		total = view.subagents.length;
+		done = view.subagents.filter((agent) => agent.status === "done").length;
+		parts.headline.textContent = total ? `${done} of ${total} subagents done` : "no subagent started yet";
+		parts.list.replaceChildren();
+		parts.note.textContent = view.waitingForUser
+			? "The agent handed the turn back: it waits for you."
+			: "The agent's todo list shows here when hooks or OTel content capture report it.";
 	}
-	const subs = view.subagents;
-	const done = subs.filter((agent) => agent.status === "done").length;
-	replace(
-		"progress",
-		el("div", {}, subs.length ? `${done} of ${subs.length} subagents done` : "no subagent started yet"),
-		subs.length
-			? el("div", { class: "progress-track" }, el("div", { class: "progress-fill", style: { width: `${(done / subs.length) * 100}%` } }))
-			: null,
-		el(
-			"div",
-			{ class: "empty-note" },
-			view.waitingForUser
-				? "The agent handed the turn back: it waits for you."
-				: "The agent's todo list shows here when hooks or OTel content capture report it.",
-		),
-	);
+	parts.track.hidden = total === 0;
+	parts.fill.style.width = total ? `${(done / total) * 100}%` : "0%";
+	parts.track.classList.toggle("active", view.live && done < total);
 }
 
 function renderRouting(view) {
@@ -436,31 +574,47 @@ function renderRouting(view) {
 	replace("routing", summary, el("div", { class: "routing-rows" }, rows), note);
 }
 
-function bars(rows, valueOf, labelOf, tipOf) {
+/** Horizontal bars, one per row, kept from render to render so a bar slides to its new length. */
+function renderBars(container, rows, valueOf, labelOf, tipOf) {
+	let list = container.querySelector(":scope > .bars");
+	if (!list) {
+		list = el("div", { class: "bars" });
+		container.replaceChildren(list);
+	}
 	const max = Math.max(...rows.map(valueOf), 0);
-	return el(
-		"div",
-		{ class: "bars" },
-		rows.map((row) =>
+	reconcile(
+		list,
+		rows,
+		(row) => row.key ?? row.name,
+		() =>
 			el(
 				"div",
-				{ class: "bar-row", tip: tipOf(row) },
-				el("span", { class: "bar-label", title: row.name }, row.name),
-				el(
-					"div",
-					{ class: "bar-track" },
-					el("div", { class: "bar-fill", style: { width: max ? `${Math.max(2, (valueOf(row) / max) * 100)}%` : "0%" } }),
-				),
-				el("span", { class: "bar-value" }, labelOf(row)),
+				{ class: "bar-row" },
+				el("span", { class: "bar-label" }),
+				el("div", { class: "bar-track" }, el("div", { class: "bar-fill", style: { width: "0%" } })),
+				el("span", { class: "bar-value" }),
 			),
-		),
+		(node, row) => {
+			const [label, track, value] = node.children;
+			node.dataset.tip = tipOf(row);
+			label.textContent = row.name;
+			label.title = row.name;
+			value.textContent = labelOf(row);
+			const width = max ? `${Math.max(2, (valueOf(row) / max) * 100)}%` : "0%";
+			// Set after the first frame, so a new bar grows from zero.
+			if (track.firstChild.style.width !== width) requestAnimationFrame(() => (track.firstChild.style.width = width));
+		},
 	);
+}
+
+function emptyNote(id, text = "—") {
+	$(id).replaceChildren(el("div", { class: "empty-note" }, text));
 }
 
 function renderCosts(view) {
 	if (!view || view.agents.size === 0) {
-		replace("cost-agents", el("div", { class: "empty-note" }, "—"));
-		replace("cost-models", el("div", { class: "empty-note" }, "—"));
+		emptyNote("cost-agents");
+		emptyNote("cost-models");
 		$("cost-note").textContent = "";
 		return;
 	}
@@ -477,29 +631,25 @@ function renderCosts(view) {
 		byName.set(agent.name, entry);
 	}
 	const agentRows = [...byName.values()]
-		.map((row) => ({ ...row, name: row.runs > 1 ? `${row.name} ×${row.runs}` : row.name }))
+		.map((row) => ({ ...row, key: row.name, name: row.runs > 1 ? `${row.name} ×${row.runs}` : row.name }))
 		.sort((x, y) => y.credits - x.credits);
 	$("cost-note").textContent = view.totals.estimated ? "estimated" : "AI credits";
-	replace(
-		"cost-agents",
-		bars(
-			agentRows,
-			(row) => row.credits,
-			(row) => (row.pending && row.calls === 0 ? "pending" : formatCredits(row.credits)),
-			(row) => `${row.name}\n${formatCredits(row.credits)} ≈ ${formatUsd(row.usd)}\n${formatTokens(row.input)} in · ${formatTokens(row.output)} out · ${row.calls} LLM calls`,
-		),
+	renderBars(
+		$("cost-agents"),
+		agentRows,
+		(row) => row.credits,
+		(row) => (row.pending && row.calls === 0 ? "pending" : formatCredits(row.credits)),
+		(row) => `${row.name}\n${formatCredits(row.credits)} ≈ ${formatUsd(row.usd)}\n${formatTokens(row.input)} in · ${formatTokens(row.output)} out · ${row.calls} LLM calls`,
 	);
 	const modelRows = [...view.byModel]
-		.map(([model, t]) => ({ name: shortModel(model), model, ...t }))
+		.map(([model, t]) => ({ name: shortModel(model), key: model, model, ...t }))
 		.sort((x, y) => y.credits - x.credits);
-	replace(
-		"cost-models",
-		bars(
-			modelRows,
-			(row) => row.credits,
-			(row) => `${formatCredits(row.credits)} · ${row.calls}×`,
-			(row) => `${row.model}\n${row.calls} calls · ${formatCredits(row.credits)} ≈ ${formatUsd(row.usd)}\ncache ${formatPercent(row.cacheRead, row.input)} of ${formatTokens(row.input)} input`,
-		),
+	renderBars(
+		$("cost-models"),
+		modelRows,
+		(row) => row.credits,
+		(row) => `${formatCredits(row.credits)} · ${row.calls}×`,
+		(row) => `${row.model}\n${row.calls} calls · ${formatCredits(row.credits)} ≈ ${formatUsd(row.usd)}\ncache ${formatPercent(row.cacheRead, row.input)} of ${formatTokens(row.input)} input`,
 	);
 }
 
@@ -586,17 +736,26 @@ function renderTimeline(view, now) {
 	replace("timeline", grid);
 }
 
-function logEntries(view) {
-	const entries = [...view.log];
+/** Every log entry, each with a key that stays the same from one render to the next. */
+function logEntries(view, { filtered = true } = {}) {
+	const entries = view.log.map((entry) => ({
+		...entry,
+		key:
+			entry.type === "llm"
+				? `llm:${entry.call.span.spanId}`
+				: entry.type === "tool"
+					? `tool:${entry.tool.span.spanId}`
+					: `hook:${entry.time}:${entry.hook?.phase}:${entry.hook?.tool}`,
+	}));
 	for (const agent of view.agents.values()) {
-		if (Number.isFinite(agent.start)) entries.push({ time: agent.start, type: "agent-start", agentKey: agent.key, agent });
-		if (agent.done && agent.end) entries.push({ time: agent.end, type: "agent-end", agentKey: agent.key, agent });
+		if (Number.isFinite(agent.start)) entries.push({ key: `start:${agent.key}`, time: agent.start, type: "agent-start", agentKey: agent.key, agent });
+		if (agent.done && agent.end) entries.push({ key: `end:${agent.key}`, time: agent.end, type: "agent-end", agentKey: agent.key, agent });
 	}
 	entries.sort((x, y) => x.time - y.time);
-	return ui.agentKey ? entries.filter((entry) => entry.agentKey === ui.agentKey) : entries;
+	return filtered && ui.agentKey ? entries.filter((entry) => entry.agentKey === ui.agentKey) : entries;
 }
 
-function logRow(view, entry) {
+function describeEntry(view, entry) {
 	const agent = entry.agentKey ? view.agents.get(entry.agentKey) : null;
 	const who = agent ? agent.label : "—";
 	let what = "";
@@ -630,22 +789,29 @@ function logRow(view, entry) {
 		what = "hook";
 		detail = [entry.hook.phase, entry.hook.tool, entry.hook.summary].filter(Boolean).join(" · ");
 	}
+	return { who, what, detail, cost, kind };
+}
+
+function createLogRow() {
 	return el(
 		"div",
 		{ class: "log-row" },
-		el("span", { class: "when" }, formatClock(entry.time)),
-		el("span", { class: "who", title: who }, who),
-		el("span", { class: `what ${kind}` }, what),
-		el("span", { class: "detail", title: detail }, detail),
-		el("span", { class: "cost" }, cost),
+		el("span", { class: "when" }),
+		el("span", { class: "who" }),
+		el("span", { class: "what" }),
+		el("span", { class: "detail" }),
+		el("span", { class: "cost" }),
 	);
 }
+
+const logMemory = { scope: null };
 
 function renderLog(view) {
 	const log = $("log");
 	if (!view) {
 		log.replaceChildren(el("div", { class: "empty-note" }, "—"));
 		$("log-meta").textContent = "";
+		logMemory.scope = null;
 		return;
 	}
 	const stick = log.scrollHeight - log.scrollTop - log.clientHeight < 40;
@@ -653,22 +819,60 @@ function renderLog(view) {
 	const shown = entries.slice(-500);
 	const agent = ui.agentKey ? view.agents.get(ui.agentKey) : null;
 	$("log-meta").textContent = `${agent ? `${agent.label} only · ` : ""}${entries.length} event${entries.length === 1 ? "" : "s"}${entries.length > shown.length ? ` · last ${shown.length}` : ""}`;
-	log.replaceChildren(...shown.map((entry) => logRow(view, entry)));
+	// A new session or a new filter fills the log at once: no row slides in then.
+	const scope = `${view.id}|${ui.agentKey ?? ""}`;
+	const sameScope = logMemory.scope === scope;
+	logMemory.scope = scope;
+	const created = reconcile(log, shown, (entry) => entry.key, createLogRow, (row, entry) => {
+		const { who, what, detail, cost, kind } = describeEntry(view, entry);
+		const [when, whoCell, whatCell, detailCell, costCell] = row.children;
+		when.textContent = formatClock(entry.time);
+		whoCell.textContent = who;
+		whoCell.title = who;
+		whatCell.className = `what ${kind}`;
+		whatCell.textContent = what;
+		detailCell.textContent = detail;
+		detailCell.title = detail;
+		costCell.textContent = cost;
+	});
+	if (sameScope && created.length <= 20) for (const row of created) flash(row, "entering");
 	if (stick) log.scrollTop = log.scrollHeight;
 }
 
+/** The status line keeps its prompt and cursor; the latest event is typed in after the prompt. */
+const statusParts = (() => {
+	const parts = {
+		typed: el("span", { class: "typed" }),
+		cursor: el("span", { class: "cursor", "aria-hidden": "true" }, "▌"),
+		agents: el("span", { class: "agents" }),
+		cost: el("span", { class: "cost-total" }),
+	};
+	$("statusline").replaceChildren(
+		el("span", { class: "prompt" }, "~/agents $"),
+		el("span", { class: "command" }, parts.typed, parts.cursor),
+		parts.agents,
+		parts.cost,
+	);
+	return parts;
+})();
+
 function renderStatusline(view) {
+	const parts = statusParts;
 	if (!view) {
-		replace("statusline", el("span", { class: "prompt" }, "~/agents $"), el("span", {}, "idle"));
+		typeInto(parts.typed, "waiting for agents");
+		parts.agents.textContent = "";
+		parts.cost.textContent = "";
 		return;
 	}
+	const latest = logEntries(view, { filtered: false }).at(-1);
+	if (latest && latest.key !== parts.typed.dataset.key) {
+		parts.typed.dataset.key = latest.key;
+		const { who, what, detail } = describeEntry(view, latest);
+		typeInto(parts.typed, `${who} ${what} ${detail}`.slice(0, 110));
+	}
 	const agents = [...view.agents.values()].sort((x, y) => x.start - y.start).slice(-8);
-	replace(
-		"statusline",
-		el("span", { class: "prompt" }, "~/agents $"),
-		agents.map((agent) => el("span", {}, `${agent.label} [${agent.status}]`)),
-		el("span", {}, `cost [${formatCredits(view.totals.credits)}]`),
-	);
+	parts.agents.textContent = agents.map((agent) => `${agent.label} [${agent.status}]`).join("  ");
+	parts.cost.textContent = `cost [${formatCredits(view.totals.credits)}]`;
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -830,14 +1034,12 @@ function renderTicketsAndSessions() {
 		),
 	);
 
-	replace(
-		"history-ticket-bars",
-		bars(
-			[...tickets].sort((x, y) => y.credits - x.credits).slice(0, 12).map((entry) => ({ ...entry, name: entry.ticket })),
-			(row) => row.credits,
-			(row) => formatCredits(row.credits),
-			(row) => `${row.ticket}\n${row.sessions} session(s) · ${formatCredits(row.credits)} ≈ ${formatUsd(row.usd)}`,
-		),
+	renderBars(
+		$("history-ticket-bars"),
+		[...tickets].sort((x, y) => y.credits - x.credits).slice(0, 12).map((entry) => ({ ...entry, name: entry.ticket })),
+		(row) => row.credits,
+		(row) => formatCredits(row.credits),
+		(row) => `${row.ticket}\n${row.sessions} session(s) · ${formatCredits(row.credits)} ≈ ${formatUsd(row.usd)}`,
 	);
 
 	const agentTotals = new Map();
@@ -846,14 +1048,12 @@ function renderTicketsAndSessions() {
 			agentTotals.set(name, (agentTotals.get(name) ?? 0) + agent.credits);
 		}
 	}
-	replace(
-		"history-agent-bars",
-		bars(
-			[...agentTotals].map(([name, credits]) => ({ name, credits })).sort((x, y) => y.credits - x.credits),
-			(row) => row.credits,
-			(row) => `${formatCredits(row.credits)} · ${formatPercent(row.credits, total)}`,
-			(row) => `${row.name}\n${formatCredits(row.credits)} over the period`,
-		),
+	renderBars(
+		$("history-agent-bars"),
+		[...agentTotals].map(([name, credits]) => ({ name, credits })).sort((x, y) => y.credits - x.credits),
+		(row) => row.credits,
+		(row) => `${formatCredits(row.credits)} · ${formatPercent(row.credits, total)}`,
+		(row) => `${row.name}\n${formatCredits(row.credits)} over the period`,
 	);
 
 	const listed = ui.historyTicket
@@ -954,7 +1154,7 @@ function render() {
 	ui.routing = view ? routingFor(view, definitionsOf(ui.place?.workspace)) : [];
 	renderLive(view, now);
 	renderKpis(view);
-	renderFlow(view, now);
+	renderFlow(view);
 	renderProgress(view);
 	renderRouting(view);
 	renderCosts(view);

@@ -218,9 +218,152 @@ select {
 }
 
 @media (prefers-reduced-motion: reduce) {
-	.dot.on,
-	.card.running {
+	.dot.on {
 		animation: none;
+	}
+}
+
+/* Motion. Everything below runs only when the system does not ask for reduced motion. */
+@media (prefers-reduced-motion: no-preference) {
+	.card {
+		transition:
+			border-color 0.4s ease,
+			background-color 0.4s ease;
+	}
+
+	.card.running {
+		animation: card-glow 2.4s ease-in-out infinite;
+	}
+
+	.card.running .card-activity {
+		animation: sweep 1.6s ease-in-out infinite;
+	}
+
+	.card.entering {
+		animation: card-in 0.45s cubic-bezier(0.2, 0.8, 0.2, 1);
+	}
+
+	.card.just-done {
+		animation: done-flash 1.1s ease-out;
+	}
+
+	.card.just-done .status {
+		animation: pop 0.5s cubic-bezier(0.3, 1.6, 0.5, 1);
+	}
+
+	.card-foot.rewritten {
+		animation: rewrite 0.5s steps(4);
+	}
+
+	.connector.flowing::before {
+		animation: march-down 0.7s linear infinite;
+	}
+
+	.connector.flowing::after {
+		animation: march-across 0.7s linear infinite;
+	}
+
+	.bar-fill,
+	.progress-fill {
+		transition: width 0.7s cubic-bezier(0.2, 0.8, 0.2, 1);
+	}
+
+	.progress-track.active .progress-fill {
+		background-image: linear-gradient(90deg, transparent 0%, rgba(255, 255, 255, 0.35) 50%, transparent 100%);
+		background-size: 50% 100%;
+		background-repeat: no-repeat;
+		animation: sweep 1.8s ease-in-out infinite;
+	}
+
+	.todos li.step-changed {
+		animation: step-flash 1.2s ease-out;
+	}
+
+	.log-row.entering {
+		animation: row-in 0.6s ease-out;
+	}
+
+	.statusline .cursor {
+		animation: blink 1s steps(1) infinite;
+	}
+}
+
+@keyframes card-glow {
+	50% {
+		box-shadow: 0 0 0 1px var(--accent), 0 0 18px var(--accent-soft);
+	}
+}
+
+@keyframes sweep {
+	from {
+		background-position: -60% 0;
+	}
+	to {
+		background-position: 160% 0;
+	}
+}
+
+@keyframes card-in {
+	from {
+		opacity: 0;
+		transform: translateY(8px) scale(0.97);
+	}
+}
+
+@keyframes done-flash {
+	0% {
+		box-shadow: 0 0 0 2px var(--good), 0 0 22px var(--good);
+	}
+	100% {
+		box-shadow: 0 0 0 0 transparent;
+	}
+}
+
+@keyframes pop {
+	0% {
+		transform: scale(0.6);
+	}
+}
+
+@keyframes rewrite {
+	0% {
+		opacity: 0.2;
+	}
+}
+
+@keyframes march-down {
+	to {
+		background-position: 0 8px;
+	}
+}
+
+@keyframes march-across {
+	to {
+		background-position: 8px 0;
+	}
+}
+
+@keyframes step-flash {
+	0% {
+		background: var(--accent-soft);
+	}
+}
+
+@keyframes row-in {
+	0% {
+		opacity: 0;
+		transform: translateX(-8px);
+		background: var(--accent-soft);
+	}
+	40% {
+		opacity: 1;
+		transform: none;
+	}
+}
+
+@keyframes blink {
+	50% {
+		opacity: 0;
 	}
 }
 
@@ -341,20 +484,45 @@ main {
 	width: min(440px, 100%);
 }
 
+#flow {
+	position: relative;
+}
+
 .connector {
 	position: relative;
 	height: 26px;
 	margin: 0 8%;
-	border-bottom: 1px dashed var(--line-strong);
+}
+
+/* Two dashed lines drawn as gradients, so the dashes can march while subagents run. */
+.connector::before,
+.connector::after {
+	content: "";
+	position: absolute;
 }
 
 .connector::before {
-	content: "";
-	position: absolute;
 	left: 50%;
 	top: 0;
+	width: 1px;
 	height: 100%;
-	border-left: 1px dashed var(--line-strong);
+	background-image: repeating-linear-gradient(to bottom, var(--line-strong) 0 4px, transparent 4px 8px);
+}
+
+.connector::after {
+	left: 0;
+	right: 0;
+	bottom: 0;
+	height: 1px;
+	background-image: repeating-linear-gradient(to right, var(--line-strong) 0 4px, transparent 4px 8px);
+}
+
+.connector.flowing::before {
+	background-image: repeating-linear-gradient(to bottom, var(--accent) 0 4px, transparent 4px 8px);
+}
+
+.connector.flowing::after {
+	background-image: repeating-linear-gradient(to right, var(--accent) 0 4px, transparent 4px 8px);
 }
 
 .connector-label {
@@ -463,6 +631,95 @@ main {
 	white-space: nowrap;
 	overflow: hidden;
 	text-overflow: ellipsis;
+}
+
+.card {
+	position: relative;
+	overflow: hidden;
+}
+
+/* A thin bar along the card's foot, sweeping while the agent works. */
+.card-activity {
+	position: absolute;
+	left: 0;
+	right: 0;
+	bottom: 0;
+	height: 2px;
+	opacity: 0;
+}
+
+.card.running .card-activity {
+	opacity: 1;
+	background: linear-gradient(90deg, transparent 0%, var(--accent) 50%, transparent 100%) no-repeat;
+	background-size: 40% 100%;
+	background-position: -40% 0;
+}
+
+/* Model families: a dot before the model's name, which stays written. */
+:root {
+	--m-haiku: #2a78d6;
+	--m-sonnet: #1baf7a;
+	--m-opus: #6250d6;
+}
+
+@media (prefers-color-scheme: dark) {
+	:root:not([data-theme="light"]) {
+		--m-haiku: #3987e5;
+		--m-sonnet: #199e70;
+		--m-opus: #9085e9;
+	}
+}
+
+:root[data-theme="dark"] {
+	--m-haiku: #3987e5;
+	--m-sonnet: #199e70;
+	--m-opus: #9085e9;
+}
+
+.badge[class*="m-"]::before {
+	content: "";
+	display: inline-block;
+	width: 6px;
+	height: 6px;
+	border-radius: 50%;
+	margin-right: 5px;
+	vertical-align: 1px;
+	background: var(--muted);
+}
+
+.badge.m-haiku::before {
+	background: var(--m-haiku);
+}
+
+.badge.m-sonnet::before {
+	background: var(--m-sonnet);
+}
+
+.badge.m-opus::before {
+	background: var(--m-opus);
+}
+
+/* Packets travelling along a connector: a brief going down, a result coming back. */
+.packet {
+	position: absolute;
+	top: 0;
+	left: 0;
+	z-index: 3;
+	pointer-events: none;
+	white-space: nowrap;
+	font-size: 10px;
+	line-height: 1.4;
+	padding: 1px 6px;
+	border-radius: 3px;
+	border: 1px solid var(--accent);
+	color: var(--accent);
+	background: var(--panel);
+	box-shadow: 0 0 10px var(--accent-soft), 0 0 0 1px var(--panel);
+}
+
+.packet.good {
+	border-color: var(--good);
+	color: var(--good);
 }
 
 .status {
@@ -997,6 +1254,43 @@ button.link {
 
 .statusline .prompt {
 	color: var(--accent);
+}
+
+.statusline > * {
+	flex: none;
+}
+
+/* The typed command takes the room left, cut with an ellipsis; the cursor always shows. */
+.statusline .command {
+	flex: 0 1 auto;
+	min-width: 0;
+	display: inline-flex;
+	color: var(--ink);
+}
+
+.statusline .typed {
+	min-width: 0;
+	overflow: hidden;
+	text-overflow: ellipsis;
+}
+
+.statusline .cursor {
+	flex: none;
+	color: var(--accent);
+	margin-left: 1px;
+}
+
+.statusline .agents {
+	flex: 0 1000 auto;
+	min-width: 0;
+	overflow: hidden;
+	text-overflow: ellipsis;
+	color: var(--muted);
+}
+
+.statusline .cost-total {
+	color: var(--muted);
+	margin-left: auto;
 }
 
 .tooltip {
