@@ -1,0 +1,19 @@
+{
+	"name": "agent-monitor",
+	"version": "0.1.0",
+	"private": true,
+	"description": "Live view of GitHub Copilot agents and subagents in VS Code: orchestration, activity, tokens and estimated cost.",
+	"type": "module",
+	"engines": {
+		"node": ">=20.19.0"
+	},
+	"bin": {
+		"agent-monitor": "src/server.js"
+	},
+	"scripts": {
+		"start": "node src/server.js",
+		"demo": "node src/server.js --demo",
+		"install-hooks": "node src/installHooks.js",
+		"test": "node --test"
+	}
+}

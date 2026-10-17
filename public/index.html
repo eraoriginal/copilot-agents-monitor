@@ -1,0 +1,84 @@
+<!doctype html>
+<html lang="en">
+	<head>
+		<meta charset="utf-8" />
+		<meta name="viewport" content="width=device-width, initial-scale=1" />
+		<title>Agent Monitor</title>
+		<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'%3E%3Crect width='16' height='16' rx='3' fill='%23e8743b'/%3E%3Crect x='4' y='5' width='2' height='2' fill='%23111'/%3E%3Crect x='10' y='5' width='2' height='2' fill='%23111'/%3E%3Crect x='4' y='10' width='8' height='1.5' fill='%23111'/%3E%3C/svg%3E" />
+		<link rel="stylesheet" href="/styles.css" />
+	</head>
+	<body>
+		<header class="topbar">
+			<div class="brand">
+				<span class="brand-mark" aria-hidden="true"></span>
+				<span class="brand-name">agent<span class="accent">monitor</span></span>
+			</div>
+			<label class="session-picker">
+				<span class="muted">session</span>
+				<select id="session-select" aria-label="Session"></select>
+			</label>
+			<label class="follow">
+				<input type="checkbox" id="follow" checked />
+				<span>follow latest</span>
+			</label>
+			<div class="live" id="live" role="status" aria-live="polite"></div>
+		</header>
+
+		<main id="app">
+			<section class="kpis" id="kpis" aria-label="Session totals"></section>
+
+			<div class="grid">
+				<section class="panel flow-panel" aria-labelledby="flow-title">
+					<div class="panel-head">
+						<h2 id="flow-title">Orchestration</h2>
+						<span class="muted" id="flow-meta"></span>
+					</div>
+					<div id="flow"></div>
+				</section>
+
+				<aside class="side">
+					<section class="panel" aria-labelledby="progress-title">
+						<div class="panel-head"><h2 id="progress-title">Progress</h2></div>
+						<div id="progress"></div>
+					</section>
+					<section class="panel" aria-labelledby="cost-title">
+						<div class="panel-head">
+							<h2 id="cost-title">Cost by agent</h2>
+							<span class="muted" id="cost-note"></span>
+						</div>
+						<div id="cost-agents"></div>
+					</section>
+					<section class="panel" aria-labelledby="model-title">
+						<div class="panel-head"><h2 id="model-title">By model</h2></div>
+						<div id="cost-models"></div>
+					</section>
+				</aside>
+			</div>
+
+			<section class="panel" aria-labelledby="timeline-title">
+				<div class="panel-head">
+					<h2 id="timeline-title">Timeline</h2>
+					<div class="legend" aria-label="Legend">
+						<span><i class="swatch llm"></i>LLM call</span>
+						<span><i class="swatch tool"></i>tool call</span>
+						<span><i class="swatch agent"></i>agent running</span>
+					</div>
+				</div>
+				<div id="timeline"></div>
+			</section>
+
+			<section class="panel" aria-labelledby="log-title">
+				<div class="panel-head">
+					<h2 id="log-title">Session log</h2>
+					<span class="muted" id="log-meta"></span>
+				</div>
+				<div class="log" id="log" tabindex="0"></div>
+			</section>
+		</main>
+
+		<footer class="statusline" id="statusline"></footer>
+		<div class="tooltip" id="tooltip" role="tooltip" hidden></div>
+
+		<script type="module" src="/app.js"></script>
+	</body>
+</html>

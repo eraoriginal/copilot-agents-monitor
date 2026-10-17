@@ -1,0 +1,17 @@
+{
+	"version": "0.0.1",
+	"configurations": [
+		{
+			"name": "agent-monitor",
+			"runtimeExecutable": "node",
+			"runtimeArgs": ["src/server.js"],
+			"port": 4319
+		},
+		{
+			"name": "agent-monitor-demo",
+			"runtimeExecutable": "node",
+			"runtimeArgs": ["src/server.js", "--demo"],
+			"port": 4329
+		}
+	]
+}
