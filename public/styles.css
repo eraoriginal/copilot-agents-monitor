@@ -255,11 +255,8 @@ select {
 		animation: rewrite 0.5s steps(4);
 	}
 
-	.connector.flowing::before {
-		animation: march-down 0.7s linear infinite;
-	}
-
-	.connector.flowing::after {
+	.child.running::before,
+	.children.flowing::before {
 		animation: march-across 0.7s linear infinite;
 	}
 
@@ -328,12 +325,6 @@ select {
 @keyframes rewrite {
 	0% {
 		opacity: 0.2;
-	}
-}
-
-@keyframes march-down {
-	to {
-		background-position: 0 8px;
 	}
 }
 
@@ -461,91 +452,182 @@ main {
 	text-overflow: ellipsis;
 }
 
-/* Orchestration -------------------------------------------------------------------------------- */
+/* Orchestration: a tree, left to right. A parent card sits on the left, the agents it launched
+   stack on the right, and each link is drawn by the child it leads to, so a line always ends on a card. */
+
+#flow {
+	position: relative;
+	overflow-x: auto;
+	--stub: 28px;
+	--edge: var(--line-strong);
+	--wave: 16px;
+}
 
 .turns {
 	display: flex;
 	flex-direction: column;
-	gap: 18px;
+	gap: 22px;
+	min-width: 0;
 }
 
-.turn {
+.turn + .turn {
+	padding-top: 18px;
+	border-top: 1px solid var(--line);
+}
+
+.node {
 	display: flex;
-	flex-direction: column;
-	align-items: stretch;
+	align-items: center;
+	min-width: 0;
 }
 
-.root-row {
-	display: flex;
-	justify-content: center;
+.slot {
+	flex: 0 0 var(--slot-width, 230px);
+	min-width: 0;
 }
 
-.root-row .card {
-	width: min(440px, 100%);
+.turn > .node.leaf > .slot {
+	flex: 0 1 460px;
 }
 
-#flow {
-	position: relative;
+.child > .node.leaf > .slot {
+	flex: 1 1 auto;
+	min-width: 200px;
+	max-width: 620px;
 }
 
-.connector {
-	position: relative;
-	height: 26px;
-	margin: 0 8%;
+.child > .node:not(.leaf) {
+	--slot-width: 210px;
 }
 
-/* Two dashed lines drawn as gradients, so the dashes can march while subagents run. */
-.connector::before,
-.connector::after {
-	content: "";
-	position: absolute;
-}
-
-.connector::before {
-	left: 50%;
-	top: 0;
-	width: 1px;
-	height: 100%;
-	background-image: repeating-linear-gradient(to bottom, var(--line-strong) 0 4px, transparent 4px 8px);
-}
-
-.connector::after {
-	left: 0;
-	right: 0;
-	bottom: 0;
-	height: 1px;
-	background-image: repeating-linear-gradient(to right, var(--line-strong) 0 4px, transparent 4px 8px);
-}
-
-.connector.flowing::before {
-	background-image: repeating-linear-gradient(to bottom, var(--accent) 0 4px, transparent 4px 8px);
-}
-
-.connector.flowing::after {
-	background-image: repeating-linear-gradient(to right, var(--accent) 0 4px, transparent 4px 8px);
-}
-
-.connector-label {
-	position: absolute;
-	left: calc(50% + 10px);
-	top: 4px;
-	font-size: 11px;
-	color: var(--muted);
-	white-space: nowrap;
-}
-
-@media (max-width: 700px) {
-	.connector-label {
-		left: auto;
-		right: 0;
-	}
+.slot > .card {
+	width: 100%;
 }
 
 .children {
-	display: grid;
-	grid-template-columns: repeat(auto-fill, minmax(190px, 1fr));
-	gap: 10px;
-	padding-top: 12px;
+	position: relative;
+	flex: 1 1 0;
+	/* A deep tree scrolls sideways rather than squeeze its cards. */
+	min-width: calc(var(--stub) + 200px);
+	margin-left: var(--stub);
+	display: flex;
+	flex-direction: column;
+}
+
+/* From the parent card to the trunk. */
+.children::before {
+	content: "";
+	position: absolute;
+	left: calc(-1 * var(--stub));
+	top: 50%;
+	width: var(--stub);
+	height: 1px;
+	background: var(--edge);
+}
+
+.child {
+	position: relative;
+	padding: 5px 0 5px var(--stub);
+}
+
+/* Agents that did not run alongside the previous ones: a gap sets the waves apart. */
+.child.wave-start {
+	margin-top: var(--wave);
+}
+
+.child:first-child {
+	margin-top: 0;
+}
+
+/* From the trunk to the child card. */
+.child::before {
+	content: "";
+	position: absolute;
+	left: 0;
+	top: 50%;
+	width: var(--stub);
+	height: 1px;
+	background: var(--edge);
+}
+
+/* The trunk: one segment per child, joined end to end. */
+.child::after {
+	content: "";
+	position: absolute;
+	left: 0;
+	top: 0;
+	bottom: 0;
+	width: 1px;
+	background: var(--edge);
+}
+
+.child:first-child::after {
+	top: 50%;
+}
+
+.child:last-child::after {
+	bottom: 50%;
+}
+
+.child:only-child::after {
+	display: none;
+}
+
+.child.wave-start:not(:first-child)::after {
+	top: calc(-1 * var(--wave));
+}
+
+/* A link lights up, in the direction of the work, while the agent it leads to runs. */
+.child.running::before,
+.children.flowing::before {
+	background: repeating-linear-gradient(90deg, var(--accent) 0 4px, transparent 4px 8px);
+}
+
+.child.running::before {
+	height: 2px;
+	margin-top: -0.5px;
+}
+
+@media (max-width: 700px) {
+	/* Narrow: each parent sits above its children, which indent under it; the trunk starts at the card. */
+	.node {
+		flex-direction: column;
+		align-items: stretch;
+	}
+
+	.slot,
+	.turn > .node.leaf > .slot,
+	.child > .node.leaf > .slot {
+		flex: none;
+		max-width: none;
+	}
+
+	.children {
+		flex: none;
+		min-width: 0;
+		margin-left: 18px;
+	}
+
+	.children::before {
+		display: none;
+	}
+
+	.child {
+		padding-left: 22px;
+	}
+
+	.child::before {
+		width: 22px;
+	}
+
+	.child:first-child::after {
+		top: 0;
+	}
+
+	.child:only-child::after {
+		display: block;
+		bottom: 50%;
+	}
 }
 
 .card {
@@ -589,9 +671,36 @@ main {
 
 .card-top {
 	display: flex;
-	align-items: center;
+	align-items: flex-start;
 	justify-content: space-between;
 	gap: 8px;
+}
+
+.card-who {
+	display: flex;
+	flex-wrap: wrap;
+	align-items: baseline;
+	column-gap: 8px;
+	min-width: 0;
+}
+
+.card-who .card-name {
+	flex: 0 1 auto;
+}
+
+/* Who launched this agent, and how long into the turn. */
+.card-tag {
+	min-width: 0;
+	overflow: hidden;
+	text-overflow: ellipsis;
+	white-space: nowrap;
+	color: var(--muted);
+	font-size: 11px;
+}
+
+.card-delegation {
+	color: var(--accent);
+	font-size: 11px;
 }
 
 .card-name {

@@ -38,9 +38,13 @@ it. See [Hooks](#hooks) for what they add and their status.
 
 - **Totals**: cost in AI credits and dollars, wall clock, agents running, tokens in and out,
   cache hit rate, LLM and tool calls.
-- **Orchestration**: the workspace, branch and ticket; each turn of the root agent, and the
-  subagents it delegated to, with their status (running, done, stalled, failed), model, duration,
-  tokens, cost and last tool call. Click a card to filter the log and the timeline to that agent.
+- **Orchestration**: the workspace, branch and ticket, then a tree, left to right: the root agent
+  of each turn on the left, the agents it launched stacked on its right, each linked to it by its
+  own line, and the agents those launched in turn further right. Every card says who launched it
+  and how far into that agent's run (`↳ conductor · +20.3s`), with its status (running, done,
+  stalled, failed), model, duration, tokens, cost and last tool call. Agents that ran side by side
+  sit together; a gap marks the next wave, which started once the previous one had finished. Click
+  a card to filter the log and the timeline to that agent.
 - **Progress**: the agent's todo list when one is reported, otherwise subagents done.
 - **Routing**: each agent's model against the ones its `.agent.md` declares — as declared, on a
   fallback, off its list, or no model declared — and what the session would have cost had every
@@ -52,8 +56,8 @@ it. See [Hooks](#hooks) for what they add and their status.
 Sessions from the last two days are listed; the page follows the latest one unless you pick
 another.
 
-The live view moves with the run: a packet travels down the connector when the root agent
-delegates and back up when a subagent finishes; the dashes march while subagents work; a running
+The live view moves with the run: a packet travels along the line to an agent when it is launched
+and back when it finishes; the dashes of a line march while the agent it leads to works; a running
 card glows and sweeps, a finished one flashes; totals count up; log lines slide in; the status line
 types the latest event; a dot before each model names its family (Haiku, Sonnet, Opus). Nothing
 moves when the system asks for reduced motion.
@@ -184,4 +188,5 @@ npm test
 | `public/workspaces.js` | a session's workspace, branch and ticket |
 | `public/app.js` | the page |
 | `public/motion.js` | persistent elements, counting numbers, packets, typing |
+| `public/tree.js` | the orchestration tree: who launched whom, which agents ran together |
 | `src/demo.js` | the `--demo` run |

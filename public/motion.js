@@ -71,23 +71,21 @@ export function flash(node, className) {
 }
 
 /**
- * Sends a labeled packet from one element to another inside `layer`, along the connector: down
- * from the source, across at `viaY`, down into the target. `up` sends it back the other way.
+ * Sends a labeled packet along `points` (page coordinates, in order from the source to the target),
+ * drawn inside `layer`. `up` sends it back the other way.
  */
-export function sendPacket(layer, from, to, { label, tone = "accent", viaY = null, up = false, duration = 1100 }) {
-	if (!motionAllowed() || !from.isConnected || !to.isConnected) return;
+export function sendPacket(layer, points, { label, tone = "accent", up = false, duration = 1100 }) {
+	if (!motionAllowed() || points.length < 2) return;
 	const base = layer.getBoundingClientRect();
-	const a = from.getBoundingClientRect();
-	const b = to.getBoundingClientRect();
-	const top = { x: a.left + a.width / 2 - base.left, y: a.bottom - base.top };
-	const bottom = { x: b.left + b.width / 2 - base.left, y: b.top - base.top };
-	const middle = viaY == null ? (top.y + bottom.y) / 2 : viaY - base.top;
-	let points = [top, { x: top.x, y: middle }, { x: bottom.x, y: middle }, bottom];
-	if (up) points = points.reverse();
-	const lengths = points.slice(1).map((point, i) => Math.hypot(point.x - points[i].x, point.y - points[i].y));
+	let path = points.map((point) => ({
+		x: point.x - base.left + layer.scrollLeft,
+		y: point.y - base.top + layer.scrollTop,
+	}));
+	if (up) path = path.reverse();
+	const lengths = path.slice(1).map((point, i) => Math.hypot(point.x - path[i].x, point.y - path[i].y));
 	const total = lengths.reduce((sum, length) => sum + length, 0) || 1;
 	let travelled = 0;
-	const frames = points.map((point, i) => {
+	const frames = path.map((point, i) => {
 		if (i > 0) travelled += lengths[i - 1];
 		return { transform: `translate(${point.x}px, ${point.y}px) translate(-50%, -50%)`, offset: travelled / total };
 	});

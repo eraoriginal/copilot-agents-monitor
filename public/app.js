@@ -9,6 +9,7 @@ import {
 } from "./format.js";
 import { createStore, deriveSession, ingest } from "./model.js";
 import { countTo, flash, motionAllowed, reconcile, sendPacket, typeInto } from "./motion.js";
+import { childrenOf, launchOf, waveStarts } from "./tree.js";
 import { counterfactual, routingFor } from "./routing.js";
 import { definitionsOf, placeOf } from "./workspaces.js";
 
@@ -240,19 +241,22 @@ function modelFamily(model) {
 function createCard() {
 	const refs = {
 		name: el("span", { class: "card-name" }),
+		tag: el("span", { class: "card-tag" }),
 		status: el("span", { class: "status" }),
 		models: el("span", { class: "card-models" }),
 		duration: el("span"),
 		tokens: el("span"),
 		cost: el("span", { class: "card-cost" }),
 		foot: el("div", { class: "card-foot" }),
+		delegation: el("div", { class: "card-delegation" }),
 	};
 	const card = el(
 		"button",
 		{ type: "button", class: "card" },
-		el("div", { class: "card-top" }, refs.name, refs.status),
+		el("div", { class: "card-top" }, el("span", { class: "card-who" }, refs.name, refs.tag), refs.status),
 		el("div", { class: "card-line" }, refs.models, refs.duration),
 		el("div", { class: "card-line" }, refs.tokens, refs.cost),
+		refs.delegation,
 		refs.foot,
 		el("div", { class: "card-activity", "aria-hidden": "true" }),
 	);
@@ -278,11 +282,20 @@ function updateCard(card, agent, isNew) {
 	if (card._status === "running" && agent.status === "done") flash(card, "just-done");
 	card._status = agent.status;
 
-	refs.name.textContent = agent.root
-		? `${agent.label} · turn ${agent.turn}`
-		: agent.unnamed
-			? `${agent.label} · identifying…`
-			: agent.label;
+	refs.name.textContent = agent.unnamed ? `${agent.label} · identifying…` : agent.label;
+	// A root agent shows its turn; any other shows who launched it and how far into that turn.
+	refs.tag.textContent = agent.root
+		? `turn ${agent.turn}`
+		: agent._launcher
+			? `↳ ${agent._launcher}${agent._offset ? ` · ${agent._offset}` : ""}`
+			: "";
+	refs.tag.title = agent.root
+		? `Turn ${agent.turn} of the conversation`
+		: agent._launcher
+			? `Launched by ${agent._launcher}${agent._offset ? `, ${agent._offset} into its turn` : ""}`
+			: "";
+	refs.delegation.textContent = agent._delegation ?? "";
+	refs.delegation.hidden = !agent._delegation;
 	refs.status.className = `status ${agent.status}`;
 	refs.status.textContent = `${STATUS_MARK[agent.status] ?? "·"} ${agent.status}`;
 
@@ -324,21 +337,87 @@ function updateCard(card, agent, isNew) {
 	}
 }
 
+/** One node of the tree: a card, and the column of the agents it launched. */
+function createNode() {
+	const node = el("div", { class: "node" });
+	node._refs = { slot: el("div", { class: "slot" }), children: el("div", { class: "children" }) };
+	node.append(node._refs.slot, node._refs.children);
+	return node;
+}
+
+/** A child in its parent's column: it owns the link that leads to it. */
+function createChild() {
+	const child = el("div", { class: "child" });
+	child._node = createNode();
+	child.append(child._node);
+	return child;
+}
+
 function createTurn() {
 	const turn = el("div", { class: "turn" });
-	turn._refs = {
-		root: el("div", { class: "root-row" }),
-		connector: el("div", { class: "connector" }),
-		label: el("span", { class: "connector-label" }),
-		children: el("div", { class: "children" }),
-	};
-	turn._refs.connector.append(turn._refs.label);
-	turn.append(turn._refs.root, turn._refs.connector, turn._refs.children);
+	turn._node = createNode();
+	turn.append(turn._node);
 	return turn;
+}
+
+function updateNode(node, view, agent, now) {
+	const refs = node._refs;
+	const kids = childrenOf(view, agent);
+	const running = kids.filter((kid) => kid.status === "running").length;
+
+	if (agent.virtual) {
+		if (!refs.slot.firstChild) {
+			refs.slot.append(el("div", { class: "empty-note" }, "These subagents report before the agent that launched them."));
+		}
+	} else {
+		agent._delegation = kids.length
+			? `${kids.length} launched · ${maxParallel(kids)} max in parallel${running ? ` · ${running} running` : ""}`
+			: "";
+		reconcile(refs.slot, [agent], (item) => item.key, createCard, updateCard);
+	}
+	node.classList.toggle("leaf", kids.length === 0);
+	refs.children.hidden = kids.length === 0;
+	refs.children.classList.toggle("flowing", running > 0);
+
+	const opens = waveStarts(kids, now);
+	for (const [index, kid] of kids.entries()) {
+		const { launcher, offset } = launchOf(agent, kid);
+		kid._launcher = launcher;
+		kid._offset = offset;
+		kid._wave = opens[index];
+	}
+	reconcile(refs.children, kids, (kid) => kid.key, createChild, (child, kid) => {
+		child.classList.toggle("running", kid.status === "running");
+		child.classList.toggle("wave-start", kid._wave);
+		updateNode(child._node, view, kid, now);
+	});
 }
 
 /** Remembers, per session, what each agent was at the last render: packets fly on changes only. */
 const flowMemory = { sessionId: null, agents: new Map() };
+
+/** The path of a link, in page coordinates: out of the parent, along the trunk, into the child. */
+function linkPoints(parentCard, childCard) {
+	const a = parentCard.getBoundingClientRect();
+	const b = childCard.getBoundingClientRect();
+	const trunkX = childCard.closest(".child").getBoundingClientRect().left;
+	const endY = b.top + b.height / 2;
+	if (trunkX >= a.right - 1) {
+		const startY = a.top + a.height / 2;
+		return [
+			{ x: a.right, y: startY },
+			{ x: trunkX, y: startY },
+			{ x: trunkX, y: endY },
+			{ x: b.left, y: endY },
+		];
+	}
+	// Narrow layout: the trunk runs down from the parent's foot.
+	return [
+		{ x: trunkX, y: a.bottom },
+		{ x: trunkX, y: endY },
+		{ x: b.left, y: endY },
+	];
+}
 
 function renderFlow(view) {
 	const flow = $("flow");
@@ -372,46 +451,33 @@ function renderFlow(view) {
 		flow.replaceChildren(turns);
 	}
 
-	const groups = view.rootAgents.map((root) => ({
-		root,
-		children: root.children
-			.map((key) => view.agents.get(key))
-			.filter(Boolean)
-			.sort((x, y) => x.start - y.start),
-	}));
-	reconcile(turns, groups, (group) => group.root.key, createTurn, (turn, { root, children }) => {
-		const refs = turn._refs;
-		reconcile(refs.root, [root], (agent) => agent.key, createCard, updateCard);
-		const running = children.filter((child) => child.status === "running").length;
-		refs.connector.hidden = children.length === 0;
-		refs.connector.classList.toggle("flowing", running > 0);
-		refs.label.textContent = `${children.length} delegated · ${maxParallel(children)} in parallel${running ? ` · ${running} running` : ""}`;
-		reconcile(refs.children, children, (agent) => agent.key, createCard, updateCard);
-	});
+	const now = Date.now();
+	const items = [...view.rootAgents];
+	const orphans = view.subagents.filter((agent) => !agent.parentKey);
+	if (orphans.length) items.push({ key: "orphans", virtual: true, children: orphans.map((agent) => agent.key), start: orphans[0].start });
+	reconcile(turns, items, (item) => item.key, createTurn, (turn, item) => updateNode(turn._node, view, item, now));
 
-	// Packets: a brief down to each new subagent, a result back up from each one that finished.
+	// Packets: a brief down each link to a new subagent, a result back up from one that finished.
 	const packets = [];
-	for (const { root, children } of groups) {
-		for (const child of children) {
-			const before = flowMemory.agents.get(child.key);
-			if (sameSession && !before) packets.push({ root, child, up: false });
-			else if (sameSession && before === "running" && child.status === "done") packets.push({ root, child, up: true });
-		}
+	for (const agent of view.agents.values()) {
+		if (agent.root || !agent.parentKey) continue;
+		const before = flowMemory.agents.get(agent.key);
+		if (sameSession && !before) packets.push({ agent, up: false });
+		else if (sameSession && before === "running" && agent.status === "done") packets.push({ agent, up: true });
 	}
 	for (const agent of view.agents.values()) flowMemory.agents.set(agent.key, agent.status);
 	if (packets.length > 0 && packets.length <= 8 && motionAllowed()) {
 		requestAnimationFrame(() => {
-			for (const [index, { root, child, up }] of packets.entries()) {
-				const rootCard = turns.querySelector(`.root-row [data-key="${CSS.escape(root.key)}"]`);
-				const childCard = turns.querySelector(`.children [data-key="${CSS.escape(child.key)}"]`);
-				const connector = rootCard?.closest(".turn")?._refs.connector;
-				if (!rootCard || !childCard) continue;
+			const cardOf = (key) => flow.querySelector(`button.card[data-key="${CSS.escape(key)}"]`);
+			for (const [index, { agent, up }] of packets.entries()) {
+				const parentCard = cardOf(agent.parentKey);
+				const childCard = cardOf(agent.key);
+				if (!parentCard || !childCard) continue;
 				setTimeout(
 					() =>
-						sendPacket(flow, rootCard, childCard, {
-							label: up ? `${child.label} ✓` : `→ ${child.unnamed ? "new subagent" : child.label}`,
+						sendPacket(flow, linkPoints(parentCard, childCard), {
+							label: up ? `${agent.label} ✓` : `→ ${agent.unnamed ? "new subagent" : agent.label}`,
 							tone: up ? "good" : "accent",
-							viaY: connector?.getBoundingClientRect().bottom,
 							up,
 						}),
 					index * 140,
