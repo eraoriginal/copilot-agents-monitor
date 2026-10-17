@@ -8,11 +8,19 @@ import {
 	shortModel,
 } from "./format.js";
 import { createStore, deriveSession, ingest } from "./model.js";
+import { counterfactual, routingFor } from "./routing.js";
+import { definitionsOf, placeOf } from "./workspaces.js";
 
 const store = createStore();
 const ui = {
+	view: "live",
 	pricing: null,
 	status: null,
+	workspaces: [],
+	history: [],
+	historyTicket: null,
+	place: null,
+	routing: [],
 	connected: false,
 	follow: true,
 	sessionId: null,
@@ -67,9 +75,11 @@ function summaryOf(session, now) {
 
 function sessionLabel(view) {
 	const agents = view.agents.size;
+	const ticket = placeOf(view, ui.workspaces).ticket;
 	const parts = [
 		view.live ? "● " : "",
 		formatClock(view.startedAt),
+		ticket ? ` · ${ticket}` : "",
 		` · ${view.title}`,
 		` · ${agents} agent${agents === 1 ? "" : "s"}`,
 		view.totals.priced ? ` · ${formatCredits(view.totals.credits)}` : "",
@@ -169,8 +179,28 @@ function maxParallel(agents) {
 	return best;
 }
 
+const ROUTING_LABEL = {
+	"as-declared": ["good", "✓", "as declared"],
+	fallback: ["warning", "↓", "fallback"],
+	"off-list": ["critical", "✕", "off list"],
+	undeclared: ["muted", "·", "no model declared"],
+	pending: ["muted", "…", "no call yet"],
+	unknown: ["muted", "?", "no agent file"],
+};
+
 function agentCard(view, agent) {
-	const models = [...agent.models].map((model) => el("span", { class: "badge" }, shortModel(model)));
+	const routing = ui.routing.find((row) => row.name === agent.name);
+	const flagged = routing && (routing.status === "fallback" || routing.status === "off-list");
+	const models = [...agent.models].map((model) =>
+		el(
+			"span",
+			{
+				class: `badge${flagged ? " warn" : ""}`,
+				title: flagged ? `${ROUTING_LABEL[routing.status][2]} · declared: ${routing.declared.join(", ")}` : model,
+			},
+			shortModel(model),
+		),
+	);
 	const t = agent.totals;
 	const last = agent.lastTool
 		? `last ${agent.lastTool.name}${agent.lastTool.summary ? ` · ${agent.lastTool.summary}` : ""}${agent.lastTool.permission ? ` · ${agent.lastTool.permission}` : ""}`
@@ -228,7 +258,15 @@ function renderFlow(view, now) {
 		$("flow-meta").textContent = "";
 		return;
 	}
-	$("flow-meta").textContent = `${view.subagents.length} subagent${view.subagents.length === 1 ? "" : "s"} · started ${formatClock(view.startedAt)}`;
+	const place = ui.place;
+	$("flow-meta").textContent = [
+		place?.workspaceName,
+		place?.branch,
+		`${view.subagents.length} subagent${view.subagents.length === 1 ? "" : "s"}`,
+		`started ${formatClock(view.startedAt)}`,
+	]
+		.filter(Boolean)
+		.join(" · ");
 	const turns = view.rootAgents.map((root) => {
 		const children = root.children
 			.map((key) => view.agents.get(key))
@@ -344,6 +382,58 @@ function renderProgress(view) {
 				: "The agent's todo list shows here when hooks or OTel content capture report it.",
 		),
 	);
+}
+
+function renderRouting(view) {
+	if (!view || view.agents.size === 0) {
+		replace("routing", el("div", { class: "empty-note" }, "—"));
+		$("routing-meta").textContent = "";
+		return;
+	}
+	const alternative = counterfactual(view, ui.pricing);
+	$("routing-meta").textContent = alternative ? `vs all on ${shortModel(alternative.baseline)}` : "";
+	const summary = alternative
+		? el(
+				"div",
+				{
+					class: "routing-summary",
+					tip: `If every LLM call had run on ${alternative.baseline}, the root agent's model.\nAn order of magnitude: another model would not spend the same tokens.${alternative.estimatedRate ? "\nThat model has no list price: priced at the rate its own calls were billed." : ""}`,
+				},
+				el(
+					"span",
+					{ class: `routing-saving ${alternative.saving >= 0 ? "good" : "critical"}` },
+					alternative.saving >= 0
+						? `saves ${Math.round(alternative.saving * 100)}%`
+						: `costs ${Math.round(-alternative.saving * 100)}% more`,
+				),
+				el(
+					"span",
+					{ class: "muted" },
+					`${formatCredits(alternative.actual)} actual · ${formatCredits(alternative.alternative)} if all on ${shortModel(alternative.baseline)}${alternative.estimatedRate ? " (est.)" : ""}`,
+				),
+			)
+		: el("div", { class: "empty-note" }, "The comparison needs the root agent's LLM calls: they arrive when its turn ends.");
+	const rows = ui.routing.map((row) => {
+		const [tone, mark, label] = ROUTING_LABEL[row.status];
+		return el(
+			"div",
+			{
+				class: "routing-row",
+				tip: `${row.name}\nran on: ${row.actual.join(", ") || "—"}\ndeclared: ${row.declared.join(", ") || "—"}`,
+			},
+			el("span", { class: "routing-name" }, row.runs > 1 ? `${row.name} ×${row.runs}` : row.name),
+			el("span", { class: "routing-models" }, row.actual.map(shortModel).join(", ") || "—"),
+			el("span", { class: `status ${tone}` }, `${mark} ${label}`),
+		);
+	});
+	const note = ui.place?.workspace
+		? null
+		: el(
+				"div",
+				{ class: "empty-note" },
+				"No known workspace defines these agents. Open the folder in VS Code once, or start the monitor with --workspace <path>.",
+			);
+	replace("routing", summary, el("div", { class: "routing-rows" }, rows), note);
 }
 
 function bars(rows, valueOf, labelOf, tipOf) {
@@ -582,26 +672,291 @@ function renderStatusline(view) {
 }
 
 // ---------------------------------------------------------------------------------------------
+// History (lot 3): sessions kept by the server, grouped by ticket.
+
+const NO_TICKET = "no ticket";
+
+function historyInScope() {
+	const workspace = $("history-workspace").value;
+	const days = Number($("history-period").value);
+	const since = days ? Date.now() - days * 86_400_000 : 0;
+	return ui.history.filter(
+		(summary) => summary.startedAt >= since && (!workspace || summary.workspace === workspace),
+	);
+}
+
+function renderHistoryFilters() {
+	const select = $("history-workspace");
+	const current = select.value;
+	const names = new Map();
+	for (const summary of ui.history) if (summary.workspace) names.set(summary.workspace, summary.workspaceName);
+	const signature = [...names.keys()].join("\n");
+	if (select.dataset.signature !== signature) {
+		select.dataset.signature = signature;
+		select.replaceChildren(
+			el("option", { value: "" }, "all workspaces"),
+			...[...names].map(([path, name]) => el("option", { value: path, title: path }, name)),
+		);
+		select.value = names.has(current) ? current : "";
+	}
+}
+
+function groupByTicket(summaries) {
+	const tickets = new Map();
+	for (const summary of summaries) {
+		const key = summary.ticket ?? NO_TICKET;
+		const entry = tickets.get(key) ?? {
+			ticket: key,
+			branches: new Set(),
+			sessions: 0,
+			first: Number.POSITIVE_INFINITY,
+			last: 0,
+			wallMs: 0,
+			credits: 0,
+			usd: 0,
+			baseline: 0,
+			baselineSessions: 0,
+			agents: new Map(),
+		};
+		if (summary.branch) entry.branches.add(summary.branch);
+		entry.sessions += 1;
+		entry.first = Math.min(entry.first, summary.startedAt);
+		entry.last = Math.max(entry.last, summary.lastActivityAt);
+		entry.wallMs += summary.wallMs;
+		entry.credits += summary.totals.credits;
+		entry.usd += summary.totals.usd;
+		if (summary.baseline) {
+			entry.baseline += summary.baseline.credits;
+			entry.baselineSessions += 1;
+		}
+		for (const [name, agent] of Object.entries(summary.byAgent ?? {})) {
+			entry.agents.set(name, (entry.agents.get(name) ?? 0) + agent.credits);
+		}
+		tickets.set(key, entry);
+	}
+	return [...tickets.values()].sort((x, y) => y.last - x.last);
+}
+
+function savingOf(entries) {
+	const priced = entries.filter((entry) => entry.baseline > 0);
+	const actual = priced.reduce((sum, entry) => sum + entry.credits, 0);
+	const baseline = priced.reduce((sum, entry) => sum + entry.baseline, 0);
+	return baseline > 0 ? 1 - actual / baseline : null;
+}
+
+function table(headers, rows) {
+	return el(
+		"table",
+		{ class: "data" },
+		el("thead", {}, el("tr", {}, headers.map(([label, numeric]) => el("th", { class: numeric ? "num" : null, scope: "col" }, label)))),
+		el("tbody", {}, rows),
+	);
+}
+
+function renderHistory() {
+	// Rebuilding the table drops the focus: give it back to the row that had it.
+	const focused = document.activeElement?.closest?.("#history-tickets tr[data-ticket]")?.dataset.ticket;
+	renderTicketsAndSessions();
+	if (focused) document.querySelector(`#history-tickets tr[data-ticket="${CSS.escape(focused)}"]`)?.focus();
+}
+
+function renderTicketsAndSessions() {
+	renderHistoryFilters();
+	const summaries = historyInScope();
+	const tickets = groupByTicket(summaries);
+	const total = summaries.reduce((sum, summary) => sum + summary.totals.credits, 0);
+	const totalUsd = summaries.reduce((sum, summary) => sum + summary.totals.usd, 0);
+	const withTicket = tickets.filter((entry) => entry.ticket !== NO_TICKET);
+	const saving = savingOf(summaries.map((summary) => ({ credits: summary.totals.credits, baseline: summary.baseline?.credits ?? 0 })));
+	replace(
+		"history-kpis",
+		kpi("cost", formatCredits(total), `≈ ${formatUsd(totalUsd)}`, true),
+		kpi("sessions", String(summaries.length), `${formatDuration(summaries.reduce((sum, s) => sum + s.wallMs, 0))} of agent time`),
+		kpi("tickets", String(withTicket.length), withTicket.length ? `${formatCredits(withTicket.reduce((sum, t) => sum + t.credits, 0) / withTicket.length)} per ticket` : "no branch named after a ticket"),
+		kpi("routing", saving == null ? "—" : `${Math.round(saving * 100)}%`, saving == null ? "no baseline yet" : "saved vs all on the root model"),
+	);
+
+	if (summaries.length === 0) {
+		const note = el(
+			"div",
+			{ class: "empty-note" },
+			"No session in this period. A session is summarized here once it has been quiet for 30 seconds.",
+		);
+		replace("history-tickets", note);
+		replace("history-ticket-bars", el("div", { class: "empty-note" }, "—"));
+		replace("history-agent-bars", el("div", { class: "empty-note" }, "—"));
+		replace("history-sessions", el("div", { class: "empty-note" }, "—"));
+		$("history-sessions-meta").textContent = "";
+		return;
+	}
+
+	replace(
+		"history-tickets",
+		table(
+			[["ticket"], ["branch"], ["sessions", true], ["last activity"], ["agent time", true], ["cost", true], ["saved", true], ["top agent"]],
+			tickets.map((entry) => {
+				const top = [...entry.agents].sort((x, y) => y[1] - x[1])[0];
+				const rowSaving = entry.baseline > 0 ? 1 - entry.credits / entry.baseline : null;
+				const selected = ui.historyTicket === entry.ticket;
+				return el(
+					"tr",
+					{
+						class: selected ? "selected" : null,
+						"data-ticket": entry.ticket,
+						tabindex: "0",
+						"aria-selected": selected ? "true" : "false",
+						onclick: () => {
+							ui.historyTicket = selected ? null : entry.ticket;
+							scheduleRender(true);
+						},
+						onkeydown: (event) => {
+							if (event.key === "Enter" || event.key === " ") {
+								event.preventDefault();
+								ui.historyTicket = selected ? null : entry.ticket;
+								scheduleRender(true);
+							}
+						},
+					},
+					el("td", { class: "strong" }, entry.ticket),
+					el("td", { class: "ellipsis", title: [...entry.branches].join(", ") }, [...entry.branches].join(", ") || "—"),
+					el("td", { class: "num" }, String(entry.sessions)),
+					el("td", {}, new Date(entry.last).toLocaleString([], { dateStyle: "short", timeStyle: "short" })),
+					el("td", { class: "num" }, formatDuration(entry.wallMs)),
+					el("td", { class: "num", title: `≈ ${formatUsd(entry.usd)}` }, formatCredits(entry.credits)),
+					el("td", { class: "num" }, rowSaving == null ? "—" : `−${Math.round(rowSaving * 100)}%`),
+					el("td", {}, top ? `${top[0]} (${formatPercent(top[1], entry.credits)})` : "—"),
+				);
+			}),
+		),
+	);
+
+	replace(
+		"history-ticket-bars",
+		bars(
+			[...tickets].sort((x, y) => y.credits - x.credits).slice(0, 12).map((entry) => ({ ...entry, name: entry.ticket })),
+			(row) => row.credits,
+			(row) => formatCredits(row.credits),
+			(row) => `${row.ticket}\n${row.sessions} session(s) · ${formatCredits(row.credits)} ≈ ${formatUsd(row.usd)}`,
+		),
+	);
+
+	const agentTotals = new Map();
+	for (const summary of summaries) {
+		for (const [name, agent] of Object.entries(summary.byAgent ?? {})) {
+			agentTotals.set(name, (agentTotals.get(name) ?? 0) + agent.credits);
+		}
+	}
+	replace(
+		"history-agent-bars",
+		bars(
+			[...agentTotals].map(([name, credits]) => ({ name, credits })).sort((x, y) => y.credits - x.credits),
+			(row) => row.credits,
+			(row) => `${formatCredits(row.credits)} · ${formatPercent(row.credits, total)}`,
+			(row) => `${row.name}\n${formatCredits(row.credits)} over the period`,
+		),
+	);
+
+	const listed = ui.historyTicket
+		? summaries.filter((summary) => (summary.ticket ?? NO_TICKET) === ui.historyTicket)
+		: summaries;
+	$("history-sessions-meta").textContent = ui.historyTicket
+		? `${ui.historyTicket} · ${listed.length} session(s)`
+		: `${listed.length} session(s)`;
+	replace(
+		"history-sessions",
+		table(
+			[["started"], ["ticket"], ["workspace"], ["root agent"], ["agents", true], ["wall clock", true], ["tokens in", true], ["cost", true], [""]],
+			listed.map((summary) => {
+				const loaded = store.sessions.has(summary.id);
+				return el(
+					"tr",
+					{},
+					el("td", {}, new Date(summary.startedAt).toLocaleString([], { dateStyle: "short", timeStyle: "short" })),
+					el("td", { title: summary.branch ?? "" }, `${summary.ticket ?? "—"}${summary.branchGuessed ? " ~" : ""}`),
+					el("td", { class: "ellipsis", title: summary.workspace ?? "" }, summary.workspaceName ?? "—"),
+					el("td", { class: "ellipsis", title: summary.prompt ?? "" }, summary.title),
+					el("td", { class: "num" }, String(summary.agents)),
+					el("td", { class: "num" }, formatDuration(summary.wallMs)),
+					el("td", { class: "num" }, formatTokens(summary.totals.input)),
+					el("td", { class: "num", title: `≈ ${formatUsd(summary.totals.usd)}` }, `${formatCredits(summary.totals.credits)}${summary.totals.estimated ? " est." : ""}`),
+					el(
+						"td",
+						{},
+						loaded
+							? el(
+									"button",
+									{
+										type: "button",
+										class: "link",
+										onclick: () => {
+											ui.sessionId = summary.id;
+											ui.follow = false;
+											$("follow").checked = false;
+											setView("live");
+										},
+									},
+									"open",
+								)
+							: null,
+					),
+				);
+			}),
+		),
+	);
+}
+
+function setView(view) {
+	ui.view = view;
+	for (const button of document.querySelectorAll("[data-view]")) {
+		button.setAttribute("aria-pressed", String(button.dataset.view === view));
+	}
+	$("app").hidden = view !== "live";
+	$("history").hidden = view !== "history";
+	for (const node of document.querySelectorAll(".live-only")) node.hidden = view !== "live";
+	if (view === "history") refreshHistory();
+	scheduleRender(true);
+}
+
+// ---------------------------------------------------------------------------------------------
 // Render loop.
+
+function currentViews(now) {
+	return [...store.sessions.values()]
+		.map((session) => summaryOf(session, now))
+		.filter((view) => view.agents.size > 0 || view.log.length > 0)
+		.sort((x, y) => y.lastActivityAt - x.lastActivityAt);
+}
+
+/** While the history shows, the top bar and the status line still follow the latest session. */
+function renderLiveSummary(now) {
+	const latest = currentViews(now)[0] ?? null;
+	renderLive(latest, now);
+	renderStatusline(latest);
+}
 
 function render() {
 	ui.renderQueued = false;
 	ui.lastRenderAt = performance.now();
 	const now = Date.now();
-	const views = [...store.sessions.values()]
-		.map((session) => summaryOf(session, now))
-		.filter((view) => view.agents.size > 0 || view.log.length > 0)
-		.sort((x, y) => y.lastActivityAt - x.lastActivityAt);
+	if (ui.view === "history") {
+		renderHistory();
+		renderLiveSummary(now);
+		return;
+	}
+	const views = currentViews(now);
 	if (ui.follow || !views.some((view) => view.id === ui.sessionId)) {
 		ui.sessionId = views[0]?.id ?? null;
 	}
 	renderSessionPicker(views);
 	const view = views.find((candidate) => candidate.id === ui.sessionId) ?? null;
 	if (ui.agentKey && !view?.agents.has(ui.agentKey)) ui.agentKey = null;
+	ui.place = view ? placeOf(view, ui.workspaces) : null;
+	ui.routing = view ? routingFor(view, definitionsOf(ui.place?.workspace)) : [];
 	renderLive(view, now);
 	renderKpis(view);
 	renderFlow(view, now);
 	renderProgress(view);
+	renderRouting(view);
 	renderCosts(view);
 	renderTimeline(view, now);
 	renderLog(view);
@@ -647,21 +1002,63 @@ document.addEventListener("mousemove", (event) => {
 	tooltip.style.top = `${Math.min(event.clientY + 14, innerHeight - box.height - 8)}px`;
 });
 
+for (const button of document.querySelectorAll("[data-view]")) {
+	button.addEventListener("click", () => setView(button.dataset.view));
+}
+for (const id of ["history-workspace", "history-period"]) {
+	$(id).addEventListener("change", () => {
+		ui.historyTicket = null;
+		scheduleRender(true);
+	});
+}
+
+async function getJson(path) {
+	const response = await fetch(path);
+	if (!response.ok) throw new Error(`${path}: ${response.status}`);
+	return response.json();
+}
+
 async function refreshStatus() {
 	try {
-		ui.status = await (await fetch("/api/status")).json();
+		ui.status = await getJson("/api/status");
 	} catch {
 		// The stream's own error handler reports the disconnection.
 	}
 }
 
+async function refreshWorkspaces() {
+	try {
+		ui.workspaces = await getJson("/api/workspaces");
+		summaries.clear();
+		ui.sessionsSignature = "";
+		scheduleRender();
+	} catch {
+		// Kept from the last refresh.
+	}
+}
+
+async function refreshHistory() {
+	try {
+		const history = await getJson("/api/history");
+		const changed = JSON.stringify(history) !== JSON.stringify(ui.history);
+		ui.history = history;
+		if (changed) scheduleRender();
+	} catch {
+		// Kept from the last refresh.
+	}
+}
+
 async function start() {
 	try {
-		ui.pricing = await (await fetch("/api/config")).json();
+		ui.pricing = await getJson("/api/config");
 	} catch {
 		ui.pricing = null;
 	}
-	await refreshStatus();
+	await Promise.all([refreshStatus(), refreshWorkspaces()]);
+	setInterval(refreshWorkspaces, 30_000);
+	setInterval(() => {
+		if (ui.view === "history") refreshHistory();
+	}, 15_000);
 	const stream = new EventSource("/api/stream");
 	stream.onopen = () => {
 		ui.connected = true;
@@ -673,11 +1070,14 @@ async function start() {
 	};
 	stream.onmessage = (message) => {
 		ingest(store, JSON.parse(message.data));
-		scheduleRender();
+		// The history redraws only when its own data or filters change: a table rebuilt every
+		// second would lose the row under the pointer and the keyboard focus.
+		if (ui.view === "live") scheduleRender();
 	};
 	setInterval(() => {
 		if (store.sessions.size === 0) refreshStatus();
-		scheduleRender();
+		if (ui.view === "live") scheduleRender();
+		else renderLiveSummary(Date.now());
 	}, 1000);
 	scheduleRender(true);
 }

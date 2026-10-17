@@ -13,9 +13,11 @@ import {
 import { join } from "node:path";
 import { dayFile, dayStamp } from "./config.js";
 
-export function appendRecord(dir, prefix, record) {
+/** Appends to the day's file for `prefix`, or to `<prefix>.jsonl` for records kept for good. */
+export function appendRecord(dir, prefix, record, { daily = true } = {}) {
 	mkdirSync(dir, { recursive: true });
-	appendFileSync(dayFile(dir, prefix), `${JSON.stringify(record)}\n`);
+	const path = daily ? dayFile(dir, prefix) : join(dir, `${prefix}.jsonl`);
+	appendFileSync(path, `${JSON.stringify(record)}\n`);
 }
 
 export function parseLines(text) {

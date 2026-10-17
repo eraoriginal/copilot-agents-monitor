@@ -10,15 +10,26 @@
  * Hook events arrive through a file: `src/hook.js` appends them, this process tails it.
  */
 
-import { createReadStream, existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import {
+	createReadStream,
+	existsSync,
+	mkdirSync,
+	mkdtempSync,
+	readFileSync,
+	rmSync,
+	writeFileSync,
+} from "node:fs";
 import { createServer } from "node:http";
+import { tmpdir } from "node:os";
 import { extname, join, normalize, resolve, sep } from "node:path";
 import { fileURLToPath } from "node:url";
 import { parseArgs } from "node:util";
 import { gunzipSync, inflateSync } from "node:zlib";
 import { DEFAULTS, dataDir } from "./config.js";
+import { createHistory } from "./history.js";
 import { flattenLogs, flattenTraces } from "./otlp.js";
 import { appendRecord, purgeOldDays, readRecentDays, tailDayFile } from "./store.js";
+import { createWorkspaceRegistry } from "./workspaces.js";
 
 const PUBLIC_DIR = resolve(fileURLToPath(new URL("../public", import.meta.url)));
 /** Copilot reports cost in AI credits; GitHub prices one credit at a cent. */
@@ -44,6 +55,7 @@ const { values: args } = parseArgs({
 		retention: { type: "string", default: String(DEFAULTS.retentionDays) },
 		raw: { type: "boolean", default: false },
 		demo: { type: "boolean", default: false },
+		workspace: { type: "string", multiple: true, default: [] },
 	},
 });
 
@@ -66,26 +78,48 @@ function hookEnvelope(record) {
 	return { kind: "hook", time, data: { ...event, cwd: event.cwd ?? record.cwd } };
 }
 
-function publish(envelope) {
+// The workspaces and the session history; the demo brings its own of both.
+let workspaces = null;
+let history = null;
+
+/** `live`: an event as it arrives, which the history also takes; not one reloaded at start. */
+function publish(envelope, { live = true } = {}) {
 	const numbered = { seq: envelopes.length + 1, ...envelope };
 	envelopes.push(numbered);
 	const frame = `id: ${numbered.seq}\ndata: ${JSON.stringify(numbered)}\n\n`;
 	for (const client of clients) client.write(frame);
+	if (live) history?.ingest(envelope);
+	if (envelope.kind === "hook") workspaces?.addFolder(envelope.data.cwd);
 	return numbered;
 }
 
-function loadHistory(days) {
-	const history = [
-		...readRecentDays(dir, "hooks", days).map(hookEnvelope),
-		...readRecentDays(dir, "spans", days).map((span) => ({
+/**
+ * Reads the retained day files once: the history summarizes all of them, the page receives the
+ * last `pageDays` days.
+ */
+function loadRecorded(pageDays, retentionDays) {
+	const recorded = [
+		...readRecentDays(dir, "hooks", retentionDays).map(hookEnvelope),
+		...readRecentDays(dir, "spans", retentionDays).map((span) => ({
 			kind: "span",
 			time: span.end ?? span.start,
 			data: span,
 		})),
-		...readRecentDays(dir, "logs", days).map((log) => ({ kind: "log", time: log.time, data: log })),
+		...readRecentDays(dir, "logs", retentionDays).map((log) => ({ kind: "log", time: log.time, data: log })),
 	].sort((a, b) => a.time - b.time);
-	for (const envelope of history) publish(envelope);
-	return history.length;
+	const cutoff = new Date();
+	cutoff.setHours(0, 0, 0, 0);
+	cutoff.setDate(cutoff.getDate() - (pageDays - 1));
+	let published = 0;
+	for (const envelope of recorded) {
+		history?.ingest(envelope);
+		if (envelope.time >= cutoff.getTime()) {
+			publish(envelope, { live: false });
+			published += 1;
+		}
+	}
+	history?.flushAll();
+	return { recorded: recorded.length, published };
 }
 
 function onHookRecord(record) {
@@ -239,6 +273,8 @@ function handleUi(request, response) {
 		return sendJson(response, 200, { ...status, dataDir: dir, otlpPort, uiPort, demo: args.demo });
 	}
 	if (pathname === "/api/config") return sendJson(response, 200, pricing);
+	if (pathname === "/api/workspaces") return sendJson(response, 200, workspaces?.list() ?? []);
+	if (pathname === "/api/history") return sendJson(response, 200, history?.list() ?? []);
 	return serveStatic(request, response);
 }
 
@@ -271,14 +307,29 @@ const removed = purgeOldDays(dir, Number(args.retention));
 if (removed.length > 0) console.log(`[agent-monitor] Removed ${removed.length} old day file(s).`);
 
 if (args.demo) {
-	const { demoEnvelopes } = await import("./demo.js");
+	const demo = await import("./demo.js");
 	const start = Date.now();
-	for (const envelope of demoEnvelopes(start)) {
+	// The demo's history lives in a throwaway folder: it never mixes with the real one.
+	const demoDir = mkdtempSync(join(tmpdir(), "agent-monitor-demo-"));
+	process.on("exit", () => rmSync(demoDir, { recursive: true, force: true }));
+	for (const signal of ["SIGINT", "SIGTERM"]) process.on(signal, () => process.exit(0));
+	writeFileSync(
+		join(demoDir, "sessions.jsonl"),
+		demo.demoPastSessions(start).map((summary) => `${JSON.stringify(summary)}\n`).join(""),
+	);
+	const workspace = demo.demoWorkspace(start);
+	workspaces = { list: () => [workspace], addFolder() {} };
+	history = createHistory({ dataDir: demoDir, workspaces, pricing });
+	for (const envelope of demo.demoEnvelopes(start)) {
 		setTimeout(() => publish(envelope), Math.max(0, envelope.time - start));
 	}
 } else {
-	const loaded = loadHistory(Number(args.days));
-	console.log(`[agent-monitor] Loaded ${loaded} event(s) from ${dir}.`);
+	workspaces = createWorkspaceRegistry({ dataDir: dir, extraFolders: args.workspace });
+	history = createHistory({ dataDir: dir, workspaces, pricing });
+	const { recorded, published } = loadRecorded(Number(args.days), Number(args.retention));
+	console.log(
+		`[agent-monitor] Loaded ${published} event(s) for the page and ${recorded} for the history from ${dir}; ${workspaces.list().length} workspace(s) found.`,
+	);
 	tailDayFile(dir, "hooks", onHookRecord);
 	listen(handleOtlp, otlpPort, "otlp");
 }

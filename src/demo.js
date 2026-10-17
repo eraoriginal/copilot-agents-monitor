@@ -10,13 +10,115 @@
 
 import { randomBytes, randomUUID } from "node:crypto";
 import { readFileSync } from "node:fs";
+import { parseAgentFile } from "../public/routing.js";
 
 const PRICES = JSON.parse(readFileSync(new URL("./pricing.json", import.meta.url), "utf8")).models;
 const MODELS = {
 	opus: { name: "claude-opus-5.5", price: PRICES["claude-opus-5-5"] },
 	sonnet: { name: "claude-sonnet-5.5", price: PRICES["claude-sonnet-5-5"] },
+	// The implementer's fallback: the run shows what the routing check reports for it.
+	sonnet5: { name: "claude-sonnet-5", price: PRICES["claude-sonnet-5"] },
 	haiku: { name: "claude-haiku-5.5", price: PRICES["claude-haiku-5-5"] },
 };
+
+const OPUS = ["Claude Opus 5.5 (copilot)", "Claude Opus 5 (copilot)"];
+const SONNET = ["Claude Sonnet 5.5 (copilot)", "Claude Sonnet 5 (copilot)"];
+const HAIKU = ["Claude Haiku 5.5 (copilot)", "Claude Haiku 4.5 (copilot)"];
+const TEAM = {
+	conductor: OPUS,
+	scout: HAIKU,
+	"contract-keeper": SONNET,
+	"ux-designer": OPUS,
+	"ui-designer": SONNET,
+	implementer: SONNET,
+	"standards-reviewer": SONNET,
+	"spec-reviewer": OPUS,
+};
+const DEMO_PATH = "C:/demo/mk-consumption-estimation-dashboard-admin";
+const DEMO_BRANCH = "feat/FRCLM-58-archive-variable";
+
+/** The workspace the demo's agents come from: a conductor and seven specialists. */
+export function demoWorkspace(now) {
+	return {
+		path: DEMO_PATH,
+		name: "mk-consumption-estimation-dashboard-admin",
+		agents: Object.entries(TEAM).map(([name, models]) =>
+			parseAgentFile(`---\nname: ${name}\nmodel: [${models.map((model) => `'${model}'`).join(", ")}]\n---\n`, `${name}.agent.md`),
+		),
+		branch: DEMO_BRANCH,
+		branchHistory: [{ since: now - 6 * 3_600_000, branch: DEMO_BRANCH }],
+	};
+}
+
+/** Past sessions for the history: a few tickets over the last days, and one off any ticket. */
+export function demoPastSessions(now) {
+	const plan = [
+		["FRCLM-52", "feat/FRCLM-52-variable-catalogue", 5.2, 38],
+		["FRCLM-52", "feat/FRCLM-52-variable-catalogue", 4.9, 21],
+		["FRCLM-53", "feat/FRCLM-53-create-variable", 4.1, 55],
+		["FRCLM-53", "feat/FRCLM-53-create-variable", 3.8, 17],
+		["FRCLM-53", "feat/FRCLM-53-create-variable", 3.7, 12],
+		["FRCLM-55", "feat/FRCLM-55-rename-variable", 2.6, 29],
+		[null, "main", 2.1, 9],
+		["FRCLM-56", "feat/FRCLM-56-variable-filters", 1.4, 44],
+		["FRCLM-56", "feat/FRCLM-56-variable-filters", 1.2, 26],
+		["FRCLM-58", DEMO_BRANCH, 0.12, 33],
+	];
+	const shares = {
+		conductor: 0.38,
+		implementer: 0.2,
+		"ux-designer": 0.14,
+		"spec-reviewer": 0.1,
+		"standards-reviewer": 0.06,
+		"ui-designer": 0.05,
+		"contract-keeper": 0.04,
+		scout: 0.03,
+	};
+	return plan.map(([ticket, branch, daysAgo, credits], index) => {
+		const startedAt = Math.round(now - daysAgo * 86_400_000);
+		const wallMs = Math.round(credits * 55_000);
+		const byAgent = Object.fromEntries(
+			Object.entries(shares).map(([name, share]) => [
+				name,
+				{ runs: name === "scout" ? 3 : 1, credits: credits * share, calls: Math.round(credits * share * 2) + 1, input: 0, output: 0 },
+			]),
+		);
+		return {
+			id: `demo-past-${index}`,
+			title: "conductor",
+			prompt: ticket ? `${ticket}` : "fix the flaky timeline test",
+			startedAt,
+			lastActivityAt: startedAt + wallMs,
+			wallMs,
+			turns: 1 + (index % 3),
+			agents: 10,
+			subagents: 9,
+			workspace: DEMO_PATH,
+			workspaceName: "mk-consumption-estimation-dashboard-admin",
+			branch,
+			branchGuessed: false,
+			ticket,
+			totals: {
+				credits,
+				usd: credits * 0.01,
+				input: Math.round(credits * 7800),
+				output: Math.round(credits * 420),
+				cacheRead: Math.round(credits * 5200),
+				calls: Math.round(credits * 0.9),
+				tools: Math.round(credits * 0.85),
+				estimated: false,
+				unpriced: 0,
+			},
+			baseline: { model: "claude-opus-5.5", credits: credits * (1.7 + (index % 4) * 0.15) },
+			byAgent,
+			byModel: {
+				"claude-opus-5.5": { calls: Math.round(credits * 0.3), credits: credits * 0.62 },
+				"claude-sonnet-5.5": { calls: Math.round(credits * 0.45), credits: credits * 0.35 },
+				"claude-haiku-5.5": { calls: Math.round(credits * 0.15), credits: credits * 0.03 },
+			},
+		};
+	});
+}
 
 const STEPS = ["Intake", "Grill", "Specify", "Design", "Build", "Review", "Close"];
 
@@ -171,7 +273,7 @@ export function demoEnvelopes(t0, { seed = 1 } = {}) {
 	t = subagent(root, "ui-designer", "sonnet", t + 0.2, 2, [["read_file", { filePath: ".scratch/frclm-58/ux.md" }], ["create_file", { filePath: ".scratch/frclm-58/components.md" }]], "plan mode: the components of the archive dialog") + 0.3;
 	todos(root, t, 4);
 	t += 0.2;
-	t = subagent(root, "implementer", "sonnet", t, 5, [
+	t = subagent(root, "implementer", "sonnet5", t, 5, [
 		["read_file", { filePath: "src/features/variables/VariableRow.tsx" }],
 		["create_file", { filePath: "src/features/variables/ArchiveVariable.test.tsx" }],
 		["run_in_terminal", { command: "pnpm vitest run src/features/variables" }],

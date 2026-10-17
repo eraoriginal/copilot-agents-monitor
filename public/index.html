@@ -13,16 +13,65 @@
 				<span class="brand-mark" aria-hidden="true"></span>
 				<span class="brand-name">agent<span class="accent">monitor</span></span>
 			</div>
-			<label class="session-picker">
+			<nav class="views" aria-label="View">
+				<button type="button" data-view="live" aria-pressed="true">live</button>
+				<button type="button" data-view="history" aria-pressed="false">history</button>
+			</nav>
+			<label class="session-picker live-only">
 				<span class="muted">session</span>
 				<select id="session-select" aria-label="Session"></select>
 			</label>
-			<label class="follow">
+			<label class="follow live-only">
 				<input type="checkbox" id="follow" checked />
 				<span>follow latest</span>
 			</label>
 			<div class="live" id="live" role="status" aria-live="polite"></div>
 		</header>
+
+		<main id="history" hidden>
+			<div class="filters">
+				<label>
+					<span class="muted">workspace</span>
+					<select id="history-workspace" aria-label="Workspace"></select>
+				</label>
+				<label>
+					<span class="muted">period</span>
+					<select id="history-period" aria-label="Period">
+						<option value="7">last 7 days</option>
+						<option value="30" selected>last 30 days</option>
+						<option value="90">last 90 days</option>
+						<option value="0">all</option>
+					</select>
+				</label>
+			</div>
+			<section class="kpis" id="history-kpis" aria-label="Totals over the period"></section>
+			<div class="grid">
+				<section class="panel" aria-labelledby="tickets-title">
+					<div class="panel-head">
+						<h2 id="tickets-title">Tickets</h2>
+						<span class="muted">click a ticket to list its sessions</span>
+					</div>
+					<div class="table-wrap" id="history-tickets"></div>
+				</section>
+				<aside class="side">
+					<section class="panel" aria-labelledby="ticket-cost-title">
+						<div class="panel-head"><h2 id="ticket-cost-title">Cost by ticket</h2></div>
+						<div id="history-ticket-bars"></div>
+					</section>
+					<section class="panel" aria-labelledby="agent-share-title">
+						<div class="panel-head"><h2 id="agent-share-title">Cost by agent</h2></div>
+						<div id="history-agent-bars"></div>
+					</section>
+				</aside>
+			</div>
+			<section class="panel" aria-labelledby="sessions-title">
+				<div class="panel-head">
+					<h2 id="sessions-title">Sessions</h2>
+					<span class="muted" id="history-sessions-meta"></span>
+				</div>
+				<div class="table-wrap" id="history-sessions"></div>
+			</section>
+		</main>
 
 		<main id="app">
 			<section class="kpis" id="kpis" aria-label="Session totals"></section>
@@ -40,6 +89,13 @@
 					<section class="panel" aria-labelledby="progress-title">
 						<div class="panel-head"><h2 id="progress-title">Progress</h2></div>
 						<div id="progress"></div>
+					</section>
+					<section class="panel" aria-labelledby="routing-title">
+						<div class="panel-head">
+							<h2 id="routing-title">Routing</h2>
+							<span class="muted" id="routing-meta"></span>
+						</div>
+						<div id="routing"></div>
 					</section>
 					<section class="panel" aria-labelledby="cost-title">
 						<div class="panel-head">
