@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { lengthOf, pathData, routesFor, rowsOf, SPACING, tidy } from "../public/routes.js";
+import { distanceTo, lengthOf, pathData, routesFor, rowsOf, SPACING, tidy, trim } from "../public/routes.js";
 
 /** A box with the centre and edges every consumer reads. */
 function box(left, top, width, height) {
@@ -141,4 +141,40 @@ test("a path rounds its corners and ends exactly where the line ends", () => {
 	assert.match(d, /^M0 0 L0 33 Q0 40 7 40 L40 40$/);
 	// Two corners too close for the full radius: the radius shrinks to fit.
 	assert.match(pathData([{ x: 0, y: 0 }, { x: 0, y: 6 }, { x: 20, y: 6 }]), /L0 3 Q0 6 3 6/);
+});
+
+test("trim shortens a line at both ends, and leaves a short one as it is", () => {
+	assert.deepEqual(trim([{ x: 0, y: 0 }, { x: 0, y: 40 }, { x: 40, y: 40 }], 4), [{ x: 0, y: 4 }, { x: 0, y: 40 }, { x: 36, y: 40 }]);
+	const short = [{ x: 0, y: 0 }, { x: 0, y: 10 }];
+	assert.equal(trim(short, 4), short);
+});
+
+test("a point's distance to a line is its distance to the nearest segment", () => {
+	const line = [{ x: 0, y: 0 }, { x: 0, y: 40 }, { x: 40, y: 40 }];
+	assert.equal(distanceTo(line, { x: 3, y: 20 }), 3);
+	assert.equal(distanceTo(line, { x: 20, y: 44 }), 4);
+	assert.equal(distanceTo(line, { x: 0, y: -5 }), 5);
+});
+
+test("a point on a stretch that lines share is on every one of them; one on a branch is on its line only", () => {
+	const { parent, kids, cells } = layout();
+	const routes = routesFor({ parent, kids, cells });
+	const near = (kind, point) => [...routes].filter(([, route]) => distanceTo(route[kind], point) < 5).map(([key]) => key).sort();
+	const all = cells.map((cell) => cell.key).sort();
+	// Out of the parent's foot, every launch runs down the same port; every return comes up another.
+	assert.deepEqual(near("launch", { x: parent.cx - SPACING.port, y: parent.bottom + 6 }), all);
+	assert.deepEqual(near("ret", { x: parent.cx + SPACING.port, y: parent.bottom + 6 }), all);
+	// Down the left rail, only the launches into the lower rows.
+	assert.deepEqual(near("launch", { x: kids.left + SPACING.rail, y: 300 }), ["d", "e", "f"]);
+	// The last stretch into a card, and the lane beside it, belong to that card's agent alone.
+	const a = cells[0];
+	assert.deepEqual(near("launch", { x: a.card.cx, y: a.card.top - 8 }), ["a"]);
+	assert.deepEqual(near("ret", { x: a.right + SPACING.lane, y: a.card.cy + 10 }), ["a"]);
+	// A point on a return is never taken for a launch.
+	for (const { ret } of routes.values()) {
+		for (const [from, to] of segments(ret)) {
+			const middle = { x: (from.x + to.x) / 2, y: (from.y + to.y) / 2 };
+			assert.deepEqual(near("launch", middle), []);
+		}
+	}
 });

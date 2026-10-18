@@ -276,7 +276,8 @@ select {
 		animation: step-flash 1.2s ease-out;
 	}
 
-	.log-row.entering {
+	.log-row.entering,
+	.tool-call.entering {
 		animation: row-in 0.6s ease-out;
 	}
 
@@ -560,6 +561,43 @@ main {
 	stroke-linejoin: round;
 }
 
+/* The lines whose messages show beside the tree. */
+.links .selected {
+	stroke-width: 2.4;
+}
+
+/* What the pointer reaches: a wide stroke along each line, over the cards, invisible until pointed
+   at. Along a stretch that lines share, every one of them lights up. */
+.links-hit {
+	position: absolute;
+	left: 0;
+	top: 0;
+	width: 1px;
+	height: 1px;
+	overflow: visible;
+	pointer-events: none;
+	z-index: 2;
+}
+
+.links-hit .hit {
+	fill: none;
+	stroke: transparent;
+	stroke-width: 10px;
+	stroke-linejoin: round;
+	pointer-events: stroke;
+	cursor: pointer;
+	outline: none;
+}
+
+.links-hit .hit.hover,
+.links-hit .hit:focus-visible {
+	stroke: color-mix(in srgb, var(--accent) 30%, transparent);
+}
+
+.links-hit .hit.selected {
+	stroke: color-mix(in srgb, var(--accent) 22%, transparent);
+}
+
 /* Out: a solid line, an arrowhead on the card it leads to. */
 .links .launch {
 	stroke: var(--edge);
@@ -804,6 +842,72 @@ main {
 
 .badge.m-opus::before {
 	background: var(--m-opus);
+}
+
+/* MCP servers: a dot before the server's name, GitHub's and Atlassian's each in their colour. */
+:root {
+	--mcp: #b0478f;
+	--mcp-github: #52514e;
+	--mcp-atlassian: #1868db;
+}
+
+@media (prefers-color-scheme: dark) {
+	:root:not([data-theme="light"]) {
+		--mcp: #d870b8;
+		--mcp-github: #c3c2b7;
+		--mcp-atlassian: #579dff;
+	}
+}
+
+:root[data-theme="dark"] {
+	--mcp: #d870b8;
+	--mcp-github: #c3c2b7;
+	--mcp-atlassian: #579dff;
+}
+
+.badge.mcp::before {
+	content: "";
+	display: inline-block;
+	width: 6px;
+	height: 6px;
+	border-radius: 1px;
+	margin-right: 5px;
+	vertical-align: 1px;
+	background: var(--mcp);
+}
+
+.badge.mcp-github::before {
+	background: var(--mcp-github);
+}
+
+.badge.mcp-atlassian::before {
+	background: var(--mcp-atlassian);
+}
+
+/* On a card: the servers the agent called and what their results cost. */
+.card-mcp {
+	display: flex;
+	flex-wrap: wrap;
+	align-items: baseline;
+	gap: 2px 4px;
+	font-size: 11px;
+	min-width: 0;
+}
+
+.card-mcp-label {
+	color: var(--mcp);
+	text-transform: uppercase;
+	letter-spacing: 0.05em;
+	margin-right: 2px;
+}
+
+.card-mcp .badge {
+	margin-right: 0;
+}
+
+.card-mcp-cost {
+	color: var(--ink-2);
+	white-space: nowrap;
 }
 
 /* A packet travelling along a line: a dot on the line, its label beside it. The label sits on the
@@ -1167,6 +1271,13 @@ button.link {
 	background: var(--tool);
 }
 
+.swatch.mcp {
+	width: 3px;
+	height: 12px;
+	border-radius: 1px;
+	background: var(--mcp);
+}
+
 .swatch.agent {
 	background: var(--agent-bar);
 	border: 1px solid var(--line-strong);
@@ -1224,6 +1335,10 @@ button.link {
 	background: var(--tool);
 	border-radius: 1px;
 	box-shadow: 0 0 0 1px var(--panel);
+}
+
+.tl-tool.mcp {
+	background: var(--mcp);
 }
 
 .tl-hit {
@@ -1308,6 +1423,10 @@ button.link {
 	color: var(--tool);
 }
 
+.log-row .what.mcp {
+	color: var(--mcp);
+}
+
 .log-row .what.agent {
 	color: var(--accent);
 }
@@ -1333,6 +1452,356 @@ button.link {
 	.log-row .what,
 	.log-row .who {
 		display: none;
+	}
+}
+
+/* Tool calls of the selected agent: beside the tree, kept in view below the top bar. -------- */
+
+.tools-panel {
+	display: flex;
+	flex-direction: column;
+	position: sticky;
+	top: calc(var(--topbar, 48px) + 12px);
+	z-index: 2;
+	max-height: calc(100vh - var(--topbar, 48px) - 60px);
+	scroll-margin-top: calc(var(--topbar, 48px) + 12px);
+	border-color: var(--accent);
+	box-shadow: 0 6px 18px rgba(0, 0, 0, 0.12);
+}
+
+.tools-head-end {
+	display: inline-flex;
+	align-items: baseline;
+	gap: 10px;
+}
+
+.tools-close {
+	font: inherit;
+	color: var(--muted);
+	background: none;
+	border: 0;
+	padding: 0 2px;
+	cursor: pointer;
+}
+
+.tools-close:hover,
+.tools-close:focus-visible {
+	color: var(--accent);
+	outline: none;
+}
+
+.tools-agent {
+	display: flex;
+	flex-wrap: wrap;
+	align-items: baseline;
+	gap: 4px 10px;
+	margin-bottom: 8px;
+}
+
+.tools-agent-name {
+	font-weight: 600;
+}
+
+.tools-messages {
+	color: var(--muted);
+	font-size: 12px;
+}
+
+.tools-tally {
+	display: flex;
+	flex-wrap: wrap;
+	gap: 4px;
+	margin-bottom: 10px;
+}
+
+.tools-tally .badge {
+	margin: 0;
+}
+
+.tools-list {
+	flex: 1 1 auto;
+	min-height: 0;
+	overflow: auto;
+	border-top: 1px solid var(--line);
+	font-size: 12px;
+}
+
+.tools-list:focus-visible {
+	outline: 2px solid var(--accent);
+	outline-offset: 2px;
+}
+
+.tool-call {
+	border-bottom: 1px solid var(--line);
+}
+
+.tool-call > summary {
+	display: grid;
+	grid-template-columns: 10px 52px auto minmax(0, 1fr) auto auto auto;
+	gap: 8px;
+	align-items: baseline;
+	padding: 4px 2px;
+	cursor: pointer;
+	list-style: none;
+}
+
+.tool-call > summary::-webkit-details-marker {
+	display: none;
+}
+
+.tool-call > summary::before {
+	content: "▸";
+	color: var(--muted);
+}
+
+.tool-call[open] > summary::before {
+	content: "▾";
+}
+
+.tool-call > summary:hover {
+	background: var(--panel-2);
+}
+
+.tool-call > summary:focus-visible {
+	outline: 2px solid var(--accent);
+	outline-offset: -2px;
+}
+
+.tc-offset,
+.tc-duration {
+	color: var(--muted);
+	white-space: nowrap;
+	font-variant-numeric: tabular-nums;
+}
+
+.tc-name {
+	color: var(--tool);
+	white-space: nowrap;
+}
+
+.tool-call.mcp .tc-name {
+	color: var(--mcp);
+}
+
+.tc-name .badge {
+	margin-right: 4px;
+}
+
+.tc-tokens {
+	color: var(--mcp);
+	white-space: nowrap;
+	font-variant-numeric: tabular-nums;
+}
+
+/* The agent's MCP use, server by server, above its calls. */
+.tools-mcp {
+	display: flex;
+	flex-direction: column;
+	gap: 4px;
+	margin-bottom: 10px;
+	font-size: 12px;
+}
+
+.mcp-row {
+	display: grid;
+	grid-template-columns: auto auto minmax(0, 1fr) auto;
+	gap: 8px;
+	align-items: baseline;
+}
+
+.mcp-row .badge,
+.mcp-server .badge {
+	margin-right: 0;
+}
+
+.mcp-tools {
+	min-width: 0;
+	overflow: hidden;
+	text-overflow: ellipsis;
+	white-space: nowrap;
+	color: var(--ink-2);
+}
+
+.mcp-cost {
+	color: var(--ink-2);
+	white-space: nowrap;
+	font-variant-numeric: tabular-nums;
+}
+
+.mcp-unused .badge {
+	opacity: 0.75;
+}
+
+/* The session's MCP servers. */
+.mcp-server {
+	display: flex;
+	flex-direction: column;
+	gap: 2px;
+	padding: 6px 0;
+	border-bottom: 1px solid var(--line);
+	font-size: 12px;
+}
+
+.mcp-server-head {
+	display: flex;
+	flex-wrap: wrap;
+	align-items: baseline;
+	gap: 4px 10px;
+}
+
+.mcp-server-head .mcp-cost {
+	margin-left: auto;
+}
+
+.mcp-server.idle .badge {
+	opacity: 0.75;
+}
+
+.mcp-server-agents .link {
+	font-size: 12px;
+}
+
+.tc-line {
+	min-width: 0;
+	overflow: hidden;
+	text-overflow: ellipsis;
+	white-space: nowrap;
+	color: var(--ink-2);
+}
+
+.tc-body {
+	display: flex;
+	flex-direction: column;
+	gap: 6px;
+	padding: 4px 4px 10px 20px;
+}
+
+.tc-facts {
+	display: grid;
+	grid-template-columns: max-content minmax(0, 1fr);
+	gap: 2px 12px;
+	margin: 0;
+}
+
+.tc-facts dt {
+	color: var(--muted);
+}
+
+.tc-facts dd {
+	margin: 0;
+	overflow-wrap: anywhere;
+}
+
+.tc-label {
+	font-size: 10px;
+	letter-spacing: 0.08em;
+	text-transform: uppercase;
+	color: var(--muted);
+}
+
+.tc-pre {
+	margin: 0;
+	padding: 8px 10px;
+	max-height: 240px;
+	overflow: auto;
+	background: var(--panel-2);
+	border: 1px solid var(--line);
+	border-radius: 4px;
+	white-space: pre-wrap;
+	overflow-wrap: anywhere;
+	font: inherit;
+}
+
+.tc-none {
+	color: var(--muted);
+	font-style: italic;
+}
+
+#tools-note {
+	margin-top: 8px;
+}
+
+/* The message a line carries: the brief sent down it, or the answer sent back up. */
+.message-tabs {
+	align-self: flex-start;
+	margin-bottom: 10px;
+}
+
+.message-route {
+	display: flex;
+	flex-wrap: wrap;
+	align-items: baseline;
+	gap: 4px 8px;
+	margin-bottom: 10px;
+}
+
+.message-route .link {
+	font-weight: 600;
+}
+
+.message-arrow {
+	color: var(--muted);
+}
+
+.message-body {
+	flex: 1 1 auto;
+	min-height: 0;
+	overflow: auto;
+	display: flex;
+	flex-direction: column;
+	gap: 14px;
+	font-size: 12px;
+}
+
+/* One agent's message; a shared line lists several, one under the other. */
+.message-item {
+	display: flex;
+	flex-direction: column;
+	gap: 8px;
+}
+
+.message-item + .message-item {
+	padding-top: 14px;
+	border-top: 1px solid var(--line);
+}
+
+.message-head {
+	display: flex;
+	flex-wrap: wrap;
+	align-items: baseline;
+	gap: 4px 10px;
+}
+
+.message-who .link {
+	font-weight: 600;
+}
+
+.message-title {
+	font-weight: 600;
+	font-size: 13px;
+}
+
+.message-text {
+	margin: 0;
+	padding: 10px 12px;
+	background: var(--panel-2);
+	border: 1px solid var(--line);
+	border-radius: 4px;
+	white-space: pre-wrap;
+	overflow-wrap: anywhere;
+	font: inherit;
+	line-height: 1.55;
+}
+
+/* Below the tree on a narrow screen: the panel takes the room it needs and scrolls with the page. */
+@media (max-width: 900px) {
+	.tools-panel {
+		position: static;
+		max-height: none;
+	}
+
+	.tools-list {
+		max-height: 60vh;
 	}
 }
 

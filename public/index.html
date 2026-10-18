@@ -86,6 +86,35 @@
 				</section>
 
 				<aside class="side">
+					<section class="panel tools-panel" id="tools-panel" aria-labelledby="tools-title" hidden>
+						<div class="panel-head">
+							<h2 id="tools-title">Tool calls</h2>
+							<span class="tools-head-end">
+								<span class="muted" id="tools-meta"></span>
+								<button type="button" class="tools-close" id="tools-close" aria-label="Close the tool calls" title="Close (Esc)">✕</button>
+							</span>
+						</div>
+						<div class="tools-agent" id="tools-agent"></div>
+						<div class="tools-mcp" id="tools-mcp" hidden></div>
+						<div class="tools-tally" id="tools-tally"></div>
+						<div class="tools-list" id="tools-list" tabindex="0"></div>
+						<div class="empty-note" id="tools-note"></div>
+					</section>
+					<section class="panel tools-panel" id="message-panel" aria-labelledby="message-title" hidden>
+						<div class="panel-head">
+							<h2 id="message-title">Message</h2>
+							<span class="tools-head-end">
+								<span class="muted" id="message-meta"></span>
+								<button type="button" class="tools-close" id="message-close" aria-label="Close the message" title="Close (Esc)">✕</button>
+							</span>
+						</div>
+						<div class="views message-tabs" role="group" aria-label="Direction">
+							<button type="button" data-direction="launch" aria-pressed="true">sent</button>
+							<button type="button" data-direction="ret" aria-pressed="false">sent back</button>
+						</div>
+						<div class="message-route" id="message-route"></div>
+						<div class="message-body" id="message-body"></div>
+					</section>
 					<section class="panel" aria-labelledby="progress-title">
 						<div class="panel-head"><h2 id="progress-title">Progress</h2></div>
 						<div id="progress"></div>
@@ -108,6 +137,13 @@
 						<div class="panel-head"><h2 id="model-title">By model</h2></div>
 						<div id="cost-models"></div>
 					</section>
+					<section class="panel" aria-labelledby="mcp-title">
+						<div class="panel-head">
+							<h2 id="mcp-title">MCP servers</h2>
+							<span class="muted" id="mcp-meta"></span>
+						</div>
+						<div id="mcp"></div>
+					</section>
 				</aside>
 			</div>
 
@@ -117,6 +153,7 @@
 					<div class="legend" aria-label="Legend">
 						<span><i class="swatch llm"></i>LLM call</span>
 						<span><i class="swatch tool"></i>tool call</span>
+						<span><i class="swatch mcp"></i>MCP call</span>
 						<span><i class="swatch agent"></i>agent running</span>
 					</div>
 				</div>

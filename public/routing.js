@@ -3,7 +3,7 @@
  * session have cost had every agent run on the root agent's model. No DOM, no Node.
  */
 
-import { callUsage, priceFor } from "./model.js";
+import { callUsage, priceFor, weightedTokens } from "./model.js";
 
 /** `Claude Opus 5.5 (copilot)` and `claude-opus-5.5` both become `claude-opus-5-5`. */
 export function normalizeModel(name) {
@@ -119,18 +119,8 @@ export function routingFor(view, definitions) {
 	});
 }
 
-/** Weights that put input, cache and output on one scale when a model has no price. */
-const WEIGHTS = { input: 1, cacheRead: 0.1, cacheWrite: 1.25, output: 5 };
-
-function weighted(usage) {
-	const uncached = Math.max(0, usage.input - usage.cacheRead - usage.cacheWrite);
-	return (
-		uncached * WEIGHTS.input +
-		usage.cacheRead * WEIGHTS.cacheRead +
-		usage.cacheWrite * WEIGHTS.cacheWrite +
-		usage.output * WEIGHTS.output
-	);
-}
+/** Input, cache and output on one scale, for a model with no price. */
+const weighted = weightedTokens;
 
 /**
  * The session's cost had every LLM call run on the root agent's main model, against what it

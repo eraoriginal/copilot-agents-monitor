@@ -43,8 +43,8 @@ it. See [Hooks](#hooks) for what they add and their status.
   turn below them. Every card says who launched it and how far into that agent's run
   (`↳ conductor · +20.3s`), with its status (running, done, stalled, failed), model, duration,
   tokens, cost and last tool call. Agents that ran side by side share a row; the next wave, which
-  started once the previous one had finished, opens a new one. Click a card to filter the log and
-  the timeline to that agent.
+  started once the previous one had finished, opens a new one. Click a card to list its tool calls
+  beside the tree and to filter the log and the timeline to that agent.
 
   Two lines join an agent to the one that launched it, and each has one direction:
   - **Out**, a solid line from the launcher's bottom-left, down the left side and along the bus
@@ -56,12 +56,30 @@ it. See [Hooks](#hooks) for what they add and their status.
     the agent failed.
 
   Lines run out on the left and back on the right, so none crosses a card or the other direction.
+  Click a line to read its messages.
+- **Messages**, for the line you click. On a line out, what the launcher sent (the description,
+  the full prompt, the agent type); on a line back, what came back once the agent was done. The
+  agents a launcher started share the stretch out of its foot: a click there lists the message of
+  every agent the line leads to, a click on the branch into one card that agent's only. Pointing
+  at a line lights up every agent's line that runs there. `sent` and `sent back` switch direction;
+  the names lead to each agent's tool calls. The tool calls panel links to an agent's messages too.
+- **Tool calls**, for the agent you click: how many of each tool, then every call in order, with
+  when it started into the agent's run, how long it took and how it ended. Open a call for its
+  call id, permission, skill, process and exit code, the agent a `task` call launched (click it to
+  move to that agent), and its arguments and result when hooks or content capture report them.
+  Above the calls, the agent's MCP use: each server it called, how often, which tools, what the
+  results cost, and the servers it could have called and did not. An MCP call shows its server
+  and tool, and the tokens its result added. `Esc` closes the panel.
 - **Progress**: the agent's todo list when one is reported, otherwise subagents done.
 - **Routing**: each agent's model against the ones its `.agent.md` declares — as declared, on a
   fallback, off its list, or no model declared — and what the session would have cost had every
   LLM call run on the root agent's model.
 - **Cost by agent** and **by model**.
-- **Timeline**: one row per agent, its LLM calls and tool calls in time.
+- **MCP servers**: each server called in the session (GitHub's, Atlassian's or another), how
+  often, by which agents, and what the results cost; then the servers the agents could call and
+  did not. Each card names the servers its agent called, with their count and cost.
+- **Timeline**: one row per agent, its LLM calls and tool calls in time, MCP calls in their own
+  colour.
 - **Session log**: every call as it arrives.
 
 Sessions from the last two days are listed; the page follows the latest one unless you pick
@@ -122,6 +140,22 @@ from [`src/pricing.json`](src/pricing.json), list prices per million tokens, and
 for a model with no list price, at the rate the root agent's own calls were billed. It is an order
 of magnitude: another model would not have spent the same tokens.
 
+**MCP calls** are `execute_tool` spans with `gen_ai.tool.type` `extension` and
+`github.copilot.tool.parameters.mcp_tool_name`. Copilot names their server by its SHA-256
+(`…mcp_server_name_hash`), in clear only with content capture; an agent's own span lists the
+servers it could call, hashed too (`github.copilot.context.mcp_server_names`). The monitor names
+a hash by hashing the names it knows: the CLI's built-in `github-mcp-server`, a few common GitHub
+and Atlassian names, and every server declared in VS Code's user `mcp.json` and `settings.json`
+(profiles included), `~/.copilot/mcp-config.json`, and each workspace's `.vscode/mcp.json`,
+`.vscode/settings.json` and `.mcp.json`. A server it cannot name shows as `server 4c96a3d`.
+
+**What a tool result costs** is estimated: tool spans carry no token count. A result enters the
+agent's context with its next LLM call, and is sent again with every call after. Its tokens are
+the growth of that call's input over the previous call's input and output, shared by the tool
+calls of that round: by the size of their results when each is known, evenly otherwise. The
+first call reads them fresh, later ones from the cache, each priced at the rate that call was
+billed per weighted token. The tools' schemas, sent with every call, are not counted.
+
 ### Hooks
 
 Hooks add what spans leave out: the moment a subagent starts, and tool arguments (the brief a
@@ -140,7 +174,10 @@ relying on them.
   shows as running with its calls pending, or as a placeholder caller above its subagents.
 - **A subagent's name** appears with its first tool call or its own span; until then it shows as
   `subagent · identifying…`.
-- **Briefs and todo lists** need hooks, or `chat.agentHost.otel.captureContent: true`. Content
+- **Messages between agents, briefs and todo lists** need hooks, or
+  `chat.agentHost.otel.captureContent: true`. Without them, a line's message says so. In the agent
+  host, the call that launched a subagent, and so its prompt and answer, arrives with the root
+  agent's spans, when its turn ends. Content
   capture puts prompts, file contents and tool arguments into the spans, and so into
   `~/.agent-monitor`. It stays local, but turn it on knowingly.
 - **Managed settings win.** An organization can set Copilot's OTel settings by policy; personal
@@ -165,7 +202,8 @@ node src/server.js [--otlp-port 4318] [--ui-port 4319] [--days 2] [--retention 1
 
 - `--demo` replays a conductor run live on <http://localhost:4329>, without VS Code: three scouts
   in parallel, designers, an implementer on its fallback model, two reviewers, on Haiku, Sonnet
-  and Opus; with a history of past tickets. Its data lives in a temporary folder, never in
+  and Opus; calls to Atlassian's and GitHub's MCP servers; with a history of past tickets. Its
+  servers are named from the known names only. Its data lives in a temporary folder, never in
   `~/.agent-monitor`. `npm run demo` does the same.
 - `--raw` also saves every OTLP request body under `~/.agent-monitor/raw`, to inspect a format.
 
@@ -194,12 +232,13 @@ npm test
 | `src/store.js` | day files: append, read, tail, purge |
 | `src/workspaces.js` | workspace discovery, agent files, branches and their changes |
 | `src/history.js` | session summaries, kept in `sessions.jsonl` |
+| `src/mcp.js` | the names of the MCP servers, by the SHA-256 Copilot reports them as |
 | `public/model.js` | the state model, shared by the page, the server and the tests |
 | `public/routing.js` | agent files, the routing check, the routing comparison |
 | `public/workspaces.js` | a session's workspace, branch and ticket |
 | `public/app.js` | the page |
 | `public/motion.js` | persistent elements, counting numbers, packets, typing |
 | `public/tree.js` | the orchestration tree: who launched whom, which agents ran together |
-| `public/routes.js` | where the lines between a parent and its agents run: plain geometry |
-| `public/links.js` | measures the cards and draws those lines in one SVG under them |
+| `public/routes.js` | where the lines between a parent and its agents run, and which lines pass by a point: plain geometry |
+| `public/links.js` | measures the cards, draws the lines in one SVG under them and their click targets over them |
 | `src/demo.js` | the `--demo` run |

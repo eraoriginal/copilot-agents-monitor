@@ -7,7 +7,7 @@ import {
 	formatUsd,
 	shortModel,
 } from "./format.js";
-import { createStore, deriveSession, ingest } from "./model.js";
+import { createStore, deriveSession, handoffOf, ingest, mcpLabel } from "./model.js";
 import { countTo, flash, motionAllowed, reconcile, sendPacket, typeInto } from "./motion.js";
 import { createLinkLayer } from "./links.js";
 import { childrenOf, groupWaves, launchOf } from "./tree.js";
@@ -18,6 +18,8 @@ const store = createStore();
 const ui = {
 	view: "live",
 	pricing: null,
+	// MCP server names by the SHA-256 Copilot reports them as, from the server.
+	mcpNames: {},
 	status: null,
 	workspaces: [],
 	history: [],
@@ -28,6 +30,11 @@ const ui = {
 	follow: true,
 	sessionId: null,
 	agentKey: null,
+	// The lines whose messages show beside the tree: `{ kind, keys }`, kind "launch" or "ret",
+	// several keys when the line clicked is a stretch that several agents' lines share.
+	link: null,
+	// The session shown, as last derived.
+	session: null,
 	renderQueued: false,
 	lastRenderAt: 0,
 	sessionsSignature: "",
@@ -67,7 +74,7 @@ const STATUS_MARK = { running: "●", done: "✓", stalled: "!", failed: "✕" }
 function summaryOf(session, now) {
 	const cached = summaries.get(session.id);
 	if (cached && cached.version === session.version && !cached.view.live) return cached.view;
-	const view = deriveSession(session, { now, pricing: ui.pricing });
+	const view = deriveSession(session, { now, pricing: ui.pricing, mcpNames: ui.mcpNames });
 	summaries.set(session.id, { version: session.version, view });
 	return view;
 }
@@ -239,6 +246,34 @@ function modelFamily(model) {
 	return /opus|fable|mythos/i.test(model) ? "opus" : /sonnet/i.test(model) ? "sonnet" : /haiku/i.test(model) ? "haiku" : "other";
 }
 
+/** Whose MCP server it is, for its badge's dot: GitHub's, Atlassian's, or another. */
+function mcpFamily(server) {
+	return /github/i.test(server ?? "") ? "github" : /atlassian|jira|confluence/i.test(server ?? "") ? "atlassian" : "other";
+}
+
+function mcpBadge(entry, text = mcpLabel(entry)) {
+	const title = `MCP server ${mcpLabel(entry)}${entry.hash && !entry.server ? `\nSHA-256 ${entry.hash}\nname it in .vscode/mcp.json or ~/.copilot/mcp-config.json` : ""}`;
+	return el("span", { class: `badge mcp mcp-${mcpFamily(entry.server)}`, title }, text);
+}
+
+/** What tool results cost once read: an estimate, always shown as one. */
+function formatContext(tokens, credits) {
+	return `≈ ${formatTokens(tokens)} tok${credits ? ` · ${formatCredits(credits)}` : ""}`;
+}
+
+/** The MCP servers an agent called, and what their results cost it: tokens, credits. */
+function mcpTotals(entries) {
+	return entries.reduce(
+		(sum, entry) => ({
+			calls: sum.calls + entry.calls,
+			tokens: sum.tokens + entry.tokens,
+			credits: sum.credits + entry.credits,
+			costed: sum.costed + entry.costed,
+		}),
+		{ calls: 0, tokens: 0, credits: 0, costed: 0 },
+	);
+}
+
 function createCard() {
 	const refs = {
 		name: el("span", { class: "card-name" }),
@@ -250,6 +285,7 @@ function createCard() {
 		cost: el("span", { class: "card-cost" }),
 		foot: el("div", { class: "card-foot" }),
 		delegation: el("div", { class: "card-delegation" }),
+		mcp: el("div", { class: "card-mcp" }),
 	};
 	const card = el(
 		"button",
@@ -258,12 +294,17 @@ function createCard() {
 		el("div", { class: "card-line" }, refs.models, refs.duration),
 		el("div", { class: "card-line" }, refs.tokens, refs.cost),
 		refs.delegation,
+		refs.mcp,
 		refs.foot,
 		el("div", { class: "card-activity", "aria-hidden": "true" }),
 	);
 	card._refs = refs;
+	card.setAttribute("aria-controls", "tools-panel");
 	card.addEventListener("click", () => {
 		ui.agentKey = ui.agentKey === card.dataset.key ? null : card.dataset.key;
+		ui.link = null;
+		// On a narrow screen the panel lies below the tree: bring it into view.
+		ui.reveal = ui.agentKey != null;
 		scheduleRender(true);
 	});
 	return card;
@@ -301,6 +342,7 @@ function updateCard(card, agent, isNew) {
 			: "";
 	refs.delegation.textContent = agent._delegation ?? "";
 	refs.delegation.hidden = !agent._delegation;
+	updateCardMcp(refs.mcp, agent);
 	refs.status.className = `status ${agent.status}`;
 	refs.status.textContent = `${STATUS_MARK[agent.status] ?? "·"} ${agent.status}`;
 
@@ -340,6 +382,24 @@ function updateCard(card, agent, isNew) {
 		// A new tool call: the line flickers, as a terminal line being rewritten.
 		if (!isNew && agent.status === "running") flash(refs.foot, "rewritten");
 	}
+}
+
+/** The card's MCP line: each server the agent called, how often, and what the results cost. */
+function updateCardMcp(line, agent) {
+	const signature = agent.mcp.map((entry) => `${entry.key}:${entry.calls}:${entry.tokens}:${entry.credits}`).join("|");
+	if (line.dataset.signature === signature) return;
+	line.dataset.signature = signature;
+	line.hidden = agent.mcp.length === 0;
+	if (line.hidden) return line.replaceChildren();
+	const total = mcpTotals(agent.mcp);
+	line.title = agent.mcp
+		.map((entry) => `${mcpLabel(entry)}: ${[...entry.tools].map(([tool, count]) => (count > 1 ? `${tool} ×${count}` : tool)).join(", ")}`)
+		.join("\n");
+	line.replaceChildren(
+		el("span", { class: "card-mcp-label" }, "mcp"),
+		...agent.mcp.map((entry) => mcpBadge(entry, `${mcpLabel(entry)} ×${entry.calls}`)),
+		total.costed ? el("span", { class: "card-mcp-cost", title: "Tokens their results added to the context, and what reading them cost: an estimate" }, formatContext(total.tokens, total.credits)) : null,
+	);
 }
 
 /** One node of the tree: a card and, below it, the agents it launched, a wave at a time. */
@@ -454,7 +514,10 @@ function renderFlow(view) {
 	reconcile(turns, items, (item) => item.key, createTurn, (turn, item) => updateNode(turn._node, view, item, now));
 
 	// The lines are drawn once the cards are in place.
-	const routes = linkLayer.update();
+	const routes = linkLayer.update({
+		selected: ui.link ? ui.link.keys.map((key) => `${ui.link.kind === "ret" ? "R" : "L"}:${key}`) : [],
+		describe: (kind, key) => describeLines(view, kind, [key]),
+	});
 
 	// Packets: one goes out along the launch line to a new subagent, one comes back along its
 	// return line when it finishes.
@@ -515,6 +578,373 @@ function setupPanel() {
 			? el("div", { class: "badge warn" }, "Protobuf received: set the protocol to http/json.")
 			: null,
 	);
+}
+
+// ---------------------------------------------------------------------------------------------
+// The selected agent's tool calls, in a panel beside the tree. Its rows are kept from render to
+// render, so a call opened to read its arguments stays open while the agent keeps working.
+
+/** Strings as they are, anything else as indented JSON. */
+function formatValue(value) {
+	if (typeof value === "string") return value;
+	try {
+		return JSON.stringify(value, null, 2);
+	} catch {
+		return String(value);
+	}
+}
+
+/** One line for a call: what its arguments say, else what its span says. */
+function toolLine(tool) {
+	if (tool.summary) return tool.summary;
+	return tool.facts
+		.filter(([label]) => label === "skill" || label === "resource" || label === "process")
+		.map(([, value]) => value)
+		.join(" · ");
+}
+
+function toolMark(tool) {
+	if (tool.failed) return ["failed", "✕ failed"];
+	const exit = tool.facts.find(([label]) => label === "exit code");
+	if (exit && exit[1] !== "0") return ["warning", `! exit ${exit[1]}`];
+	if (tool.permission && !/approved|allow/i.test(tool.permission)) return ["warning", `! ${tool.permission}`];
+	return ["done", "✓"];
+}
+
+function selectAgent(key) {
+	ui.agentKey = key;
+	ui.link = null;
+	scheduleRender(true);
+}
+
+function createToolRow() {
+	const refs = {
+		offset: el("span", { class: "tc-offset" }),
+		name: el("span", { class: "tc-name" }),
+		line: el("span", { class: "tc-line" }),
+		tokens: el("span", { class: "tc-tokens" }),
+		duration: el("span", { class: "tc-duration" }),
+		mark: el("span", { class: "status" }),
+		body: el("div", { class: "tc-body" }),
+	};
+	const row = el(
+		"details",
+		{ class: "tool-call" },
+		el("summary", {}, refs.offset, refs.name, refs.line, refs.tokens, refs.duration, refs.mark),
+		refs.body,
+	);
+	row._refs = refs;
+	return row;
+}
+
+function updateToolRow(row, { tool, agent, view }) {
+	const refs = row._refs;
+	const launched = tool.launchedKey ? view.agents.get(tool.launchedKey) : null;
+	const duration = formatDuration((tool.end ?? tool.start) - tool.start);
+	// A `task` call names the agent it launched; its brief need not repeat the agent's name.
+	let brief = toolLine(tool);
+	if (launched && (brief === launched.name || brief.startsWith(`${launched.name} · `))) brief = brief.slice(launched.name.length + 3);
+	const line = [launched ? `→ ${launched.label}` : null, brief].filter(Boolean).join(" · ");
+	const [tone, mark] = toolMark(tool);
+	refs.offset.textContent = Number.isFinite(agent.start) ? `+${formatDuration(tool.start - agent.start)}` : formatClock(tool.start);
+	refs.offset.title = formatClock(tool.start);
+	// An MCP call shows its server and the tool it called there.
+	const nameSignature = tool.mcp ? `${mcpLabel(tool.mcp)}|${tool.mcp.tool}` : tool.name;
+	if (refs.name.dataset.signature !== nameSignature) {
+		refs.name.dataset.signature = nameSignature;
+		refs.name.replaceChildren(...(tool.mcp ? [mcpBadge(tool.mcp), tool.mcp.tool] : [tool.name]));
+		row.classList.toggle("mcp", Boolean(tool.mcp));
+	}
+	refs.tokens.textContent = tool.mcp && tool.cost ? `≈ ${formatTokens(tool.cost.tokens)}` : "";
+	refs.tokens.title = tool.mcp && tool.cost ? "tokens its result added to the context: an estimate" : "";
+	refs.line.textContent = line;
+	refs.line.title = line;
+	refs.duration.textContent = duration;
+	refs.mark.className = `status ${tone}`;
+	refs.mark.textContent = mark;
+
+	// The details are rebuilt only when they change: an open row keeps its text selection.
+	const cost = tool.cost ? [tool.cost.tokens, tool.cost.reads, tool.cost.credits].join(":") : "";
+	const signature = [duration, tool.permission, tool.failed, tool.args != null, tool.result != null, launched?.label, launched?.status, cost, tool.mcp ? mcpLabel(tool.mcp) : ""].join("|");
+	if (row._signature === signature) return;
+	row._signature = signature;
+	const facts = [
+		["started", formatClock(tool.start)],
+		["duration", duration],
+		["call id", tool.callId],
+		["permission", tool.permission],
+		...(tool.mcp
+			? [
+					["mcp server", mcpLabel(tool.mcp)],
+					["mcp tool", tool.mcp.tool],
+					["server hash", tool.mcp.server ? null : tool.mcp.hash],
+				]
+			: []),
+		["context", contextFact(tool)],
+		...tool.facts,
+	].filter(([, value]) => value != null && value !== "");
+	const body = [
+		el(
+			"dl",
+			{ class: "tc-facts" },
+			facts.flatMap(([label, value]) => [el("dt", {}, label), el("dd", {}, value)]),
+			launched
+				? [
+						el("dt", {}, "launched"),
+						el(
+							"dd",
+							{},
+							el("button", { type: "button", class: "link", onclick: () => selectAgent(launched.key) }, launched.label),
+							` · ${launched.status}`,
+						),
+					]
+				: null,
+		),
+	];
+	if (tool.args != null) body.push(el("div", { class: "tc-label" }, "arguments"), el("pre", { class: "tc-pre" }, formatValue(tool.args)));
+	if (tool.result != null) body.push(el("div", { class: "tc-label" }, "result"), el("pre", { class: "tc-pre" }, formatValue(tool.result)));
+	if (tool.args == null && tool.result == null) body.push(el("div", { class: "tc-none" }, "arguments and result not captured"));
+	refs.body.replaceChildren(...body);
+}
+
+/** What a call's result cost: the tokens it added to the context, the calls that read it, the credits. */
+function contextFact(tool) {
+	if (!tool.cost) return tool.end == null ? null : "not read by a later LLM call (yet)";
+	const { tokens, reads, credits, shared } = tool.cost;
+	return [
+		`≈ ${formatTokens(tokens)} tokens`,
+		`read by ${reads} LLM call${reads === 1 ? "" : "s"}`,
+		credits != null ? `≈ ${formatCredits(credits)}` : null,
+		shared ? "shared evenly with the calls of its round" : null,
+	]
+		.filter(Boolean)
+		.join(" · ");
+}
+
+/** The agent's MCP use, server by server, and the servers it could call and did not. */
+function renderToolsMcp(agent) {
+	const block = $("tools-mcp");
+	const unused = agent.mcpAvailable.filter((entry) => !agent.mcp.some((used) => used.key === (entry.server ?? entry.hash)));
+	const signature = JSON.stringify([agent.mcp.map((entry) => [entry.key, entry.calls, entry.failed, entry.tokens, entry.credits, [...entry.tools]]), unused.map(mcpLabel)]);
+	if (block.dataset.signature === signature) return;
+	block.dataset.signature = signature;
+	block.hidden = agent.mcp.length === 0 && unused.length === 0;
+	const rows = agent.mcp.map((entry) =>
+		el(
+			"div",
+			{ class: "mcp-row" },
+			mcpBadge(entry),
+			el("span", {}, `${entry.calls} call${entry.calls === 1 ? "" : "s"}${entry.failed ? ` · ${entry.failed} failed` : ""}`),
+			el("span", { class: "mcp-tools", title: [...entry.tools.keys()].join(", ") }, [...entry.tools].map(([tool, count]) => (count > 1 ? `${tool} ×${count}` : tool)).join(", ")),
+			el("span", { class: "mcp-cost", title: "Tokens their results added to the context, and what reading them cost: an estimate" }, entry.costed ? formatContext(entry.tokens, entry.credits) : "—"),
+		),
+	);
+	block.replaceChildren(
+		el("div", { class: "tc-label" }, "mcp"),
+		...rows,
+		unused.length ? el("div", { class: "muted mcp-unused" }, "available, not called: ", unused.flatMap((entry, index) => [index ? " " : null, mcpBadge(entry)])) : null,
+	);
+}
+
+const toolsMemory = { scope: null };
+
+function renderTools(view) {
+	const panel = $("tools-panel");
+	const agent = ui.agentKey ? view?.agents.get(ui.agentKey) : null;
+	panel.hidden = !agent;
+	if (!agent) {
+		toolsMemory.scope = null;
+		return;
+	}
+	const tools = [...agent.tools].sort((x, y) => x.start - y.start);
+	const failed = tools.filter((tool) => tool.failed).length;
+	$("tools-meta").textContent = `${tools.length} call${tools.length === 1 ? "" : "s"}${failed ? ` · ${failed} failed` : ""}`;
+
+	// Rebuilt only when it changes: its buttons must outlive a click.
+	const launched = Boolean(agent.parentKey && view.agents.has(agent.parentKey));
+	const head = [agent.label, agent.status, formatDuration(agent.durationMs), agent.turn, agent._launcher, launched].join("|");
+	if ($("tools-agent").dataset.signature !== head) {
+		$("tools-agent").dataset.signature = head;
+		replace(
+			"tools-agent",
+			el("span", { class: "tools-agent-name" }, agent.label),
+			el("span", { class: `status ${agent.status}` }, `${STATUS_MARK[agent.status] ?? "·"} ${agent.status}`),
+			el("span", { class: "muted" }, formatDuration(agent.durationMs)),
+			agent.root ? el("span", { class: "muted" }, `turn ${agent.turn}`) : agent._launcher ? el("span", { class: "muted" }, `↳ ${agent._launcher}`) : null,
+			// The messages on its lines, for whoever cannot point at a line.
+			launched
+				? el(
+						"span",
+						{ class: "tools-messages" },
+						el("button", { type: "button", class: "link", onclick: () => selectLines("launch", [agent.key]) }, "message sent"),
+						" · ",
+						el("button", { type: "button", class: "link", onclick: () => selectLines("ret", [agent.key]) }, "sent back"),
+					)
+				: null,
+		);
+	}
+
+	renderToolsMcp(agent);
+
+	const counts = new Map();
+	for (const tool of tools) counts.set(tool.name, (counts.get(tool.name) ?? 0) + 1);
+	replace(
+		"tools-tally",
+		[...counts]
+			.sort((x, y) => y[1] - x[1] || x[0].localeCompare(y[0]))
+			.map(([name, count]) => el("span", { class: "badge" }, count > 1 ? `${name} ×${count}` : name)),
+	);
+	$("tools-tally").hidden = tools.length === 0;
+
+	const list = $("tools-list");
+	const scope = `${view.id}|${agent.key}`;
+	const sameScope = toolsMemory.scope === scope;
+	toolsMemory.scope = scope;
+	const stick = list.scrollHeight - list.scrollTop - list.clientHeight < 40;
+	const created = reconcile(
+		list,
+		tools.map((tool) => ({ tool, agent, view })),
+		(item) => item.tool.span.spanId,
+		createToolRow,
+		updateToolRow,
+	);
+	list.hidden = tools.length === 0;
+	if (!sameScope) list.scrollTop = 0;
+	else if (stick) list.scrollTop = list.scrollHeight;
+	if (sameScope && created.length <= 20) for (const row of created) flash(row, "entering");
+
+	const note = agent.placeholder
+		? "This agent reports its own calls when its turn ends."
+		: tools.length === 0
+			? "No tool call reported yet."
+			: tools.some((tool) => tool.args != null || tool.result != null)
+				? ""
+				: "Arguments and results show here with hooks, or with chat.agentHost.otel.captureContent: true.";
+	$("tools-note").textContent = note;
+	$("tools-note").hidden = !note;
+}
+
+// ---------------------------------------------------------------------------------------------
+// The messages a line carries: what a parent sent the agents it reaches, or what they sent back.
+// A stretch that several agents' lines share carries all their messages.
+
+const CAPTURE_HINT = "It shows with hooks, or with chat.agentHost.otel.captureContent: true.";
+
+function agentButton(agent) {
+	return el("button", { type: "button", class: "link", title: `Show ${agent.label}'s tool calls`, onclick: () => selectAgent(agent.key) }, agent.label);
+}
+
+/** Who sends to whom along lines of one direction, and what a click on them shows. */
+function describeLines(view, kind, keys) {
+	const agents = keys.map((key) => view.agents.get(key)).filter(Boolean);
+	const parent = agents[0] ? view.agents.get(agents[0].parentKey) : null;
+	if (!parent) return "";
+	const names = agents.map((agent) => agent.label).join(", ");
+	const many = agents.length > 1;
+	return kind === "ret"
+		? `${names} → ${parent.label}\nclick to read ${many ? `the ${agents.length} answers` : "what it sent back"}`
+		: `${parent.label} → ${names}\nclick to read ${many ? `the ${agents.length} messages sent` : "what it was sent"}`;
+}
+
+function selectLines(kind, keys) {
+	const same = ui.link?.kind === kind && ui.link.keys.length === keys.length && keys.every((key) => ui.link.keys.includes(key));
+	ui.link = same ? null : { kind, keys: [...keys] };
+	ui.agentKey = null;
+	ui.reveal = !same;
+	scheduleRender(true);
+}
+
+/** One agent's message: when it went, then the description, the text, the other arguments. */
+function messageItem({ agent, parent, message }, back, single) {
+	const when = back
+		? agent.done
+			? `sent back after ${formatDuration(agent.durationMs)} of work`
+			: agent.status
+		: agent._offset
+			? `sent ${agent._offset} into ${parent.label}'s run`
+			: "";
+	const head = el(
+		"div",
+		{ class: "message-head" },
+		single ? null : el("span", { class: "message-who" }, agentButton(agent)),
+		!single && message.at ? el("span", { class: "muted" }, formatClock(message.at)) : null,
+		when ? el("span", { class: "muted" }, when) : null,
+	);
+	const body = [];
+	if (!back && message.title) body.push(el("div", { class: "message-title" }, message.title));
+	if (message.text) body.push(el("pre", { class: "message-text" }, message.text));
+	if (!back && message.fields.length > 0) {
+		body.push(el("dl", { class: "tc-facts" }, message.fields.flatMap(([label, value]) => [el("dt", {}, label), el("dd", {}, value)])));
+	}
+	let note = "";
+	if (back && !agent.done) {
+		note = agent.status === "failed" ? `${agent.label} failed.` : `${agent.label} is still working: its answer comes back when it finishes.`;
+	} else if (!message.text) {
+		const what = back ? "The answer was not reported." : message.title ? "Only the description was reported, not the prompt." : "The prompt was not reported.";
+		note = `${what} ${CAPTURE_HINT}`;
+		// The agent host exports the launching call with the root agent's spans, when its turn ends.
+		if (!agent.launchTool && parent.placeholder) note += ` The call that launched ${agent.label} reports when ${parent.label}'s turn ends.`;
+	}
+	if (note) body.push(el("div", { class: "empty-note" }, note));
+	return el("section", { class: "message-item" }, head.childNodes.length ? head : null, body);
+}
+
+const messageMemory = { signature: null };
+
+function renderMessage(view) {
+	const panel = $("message-panel");
+	const agents = (ui.link?.keys ?? [])
+		.map((key) => view?.agents.get(key))
+		.filter((agent) => agent?.parentKey && view.agents.has(agent.parentKey))
+		.sort((x, y) => x.start - y.start);
+	panel.hidden = agents.length === 0;
+	if (panel.hidden) {
+		messageMemory.signature = null;
+		return;
+	}
+	const back = ui.link.kind === "ret";
+	for (const button of panel.querySelectorAll("[data-direction]")) {
+		button.setAttribute("aria-pressed", String(button.dataset.direction === ui.link.kind));
+	}
+	const items = agents.map((agent) => {
+		const { sent, returned } = handoffOf(agent);
+		return { agent, parent: view.agents.get(agent.parentKey), message: back ? returned : sent };
+	});
+	const single = items.length === 1;
+	$("message-meta").textContent = single
+		? items[0].message.at
+			? formatClock(items[0].message.at)
+			: ""
+		: `${items.length} ${back ? "answers" : "messages"}`;
+
+	// Rebuilt only when it changes: a reader's text selection survives the live updates.
+	const signature = [
+		view.id,
+		ui.link.kind,
+		...items.map(({ agent, parent, message }) =>
+			[agent.key, agent.label, agent.status, agent._offset, parent.label, message.title, message.text, Boolean(agent.launchTool)].join("\u0001"),
+		),
+	].join("\u0000");
+	if (messageMemory.signature === signature) return;
+	messageMemory.signature = signature;
+
+	// The route: the launcher and every agent its line reaches, or those agents and the launcher.
+	const launchers = [...new Set(items.map((item) => item.parent))].flatMap((parent, index) => [index > 0 ? ", " : null, agentButton(parent)]);
+	const reached = el("span", { class: "message-agents" }, items.flatMap(({ agent }, index) => [index > 0 ? ", " : null, agentButton(agent)]));
+	const arrow = el("span", { class: "message-arrow", "aria-label": "to" }, "→");
+	replace("message-route", back ? [reached, arrow, ...launchers] : [...launchers, arrow, reached]);
+	replace("message-body", items.map((item) => messageItem(item, back, single)));
+}
+
+/** On a narrow screen the side panels lie below the tree: brings the one just opened into view. */
+function revealPanel() {
+	ui.reveal = false;
+	const panel = [$("tools-panel"), $("message-panel")].find((candidate) => !candidate.hidden);
+	if (!panel) return;
+	const box = panel.getBoundingClientRect();
+	if (box.top < 0 || box.top > window.innerHeight - 80) {
+		panel.scrollIntoView({ block: "start", behavior: motionAllowed() ? "smooth" : "auto" });
+	}
 }
 
 /** The progress panel keeps its bar and its list, so the bar slides and a step lights up. */
@@ -714,6 +1144,73 @@ function renderCosts(view) {
 	);
 }
 
+/** The session's MCP servers: who called each, how often, what the results cost; and the unused ones. */
+function renderMcp(view) {
+	const container = $("mcp");
+	if (!view) {
+		container.dataset.signature = "";
+		emptyNote("mcp");
+		$("mcp-meta").textContent = "";
+		return;
+	}
+	const unused = view.mcpAvailable.filter((entry) => !view.mcp.some((used) => used.key === entry.key));
+	const total = mcpTotals(view.mcp);
+	$("mcp-meta").textContent = total.calls
+		? `${total.calls} call${total.calls === 1 ? "" : "s"}${total.costed ? ` · ${formatContext(total.tokens, total.credits)}` : ""}`
+		: "";
+	// Rebuilt only when it changes: its buttons must outlive a click.
+	const labels = (keys) => [...keys].map((key) => view.agents.get(key)?.label);
+	const signature = JSON.stringify([
+		view.id,
+		view.mcp.map((entry) => [entry.key, entry.calls, entry.failed, entry.tokens, entry.credits, labels(entry.agents)]),
+		unused.map((entry) => [entry.key, labels(entry.agents)]),
+	]);
+	if (container.dataset.signature === signature) return;
+	container.dataset.signature = signature;
+	const agentsOf = (keys) =>
+		[...keys]
+			.map((key) => view.agents.get(key))
+			.filter(Boolean)
+			.flatMap((agent, index) => [index ? ", " : null, agentButton(agent)]);
+	const called = view.mcp.map((entry) =>
+		el(
+			"div",
+			{ class: "mcp-server", tip: `${mcpLabel(entry)}\n${[...entry.tools].map(([tool, count]) => `${tool} ×${count}`).join("\n")}` },
+			el(
+				"div",
+				{ class: "mcp-server-head" },
+				mcpBadge(entry),
+				el("span", {}, `${entry.calls} call${entry.calls === 1 ? "" : "s"}${entry.failed ? ` · ${entry.failed} failed` : ""}`),
+				el("span", { class: "mcp-cost" }, entry.costed ? formatContext(entry.tokens, entry.credits) : "—"),
+			),
+			el("div", { class: "mcp-server-agents muted" }, "by ", agentsOf(entry.agents)),
+		),
+	);
+	const idle = unused.map((entry) =>
+		el(
+			"div",
+			{ class: "mcp-server idle" },
+			el("div", { class: "mcp-server-head" }, mcpBadge(entry), el("span", { class: "muted" }, "not called")),
+			el("div", { class: "mcp-server-agents muted" }, "available to ", agentsOf(entry.agents)),
+		),
+	);
+	if (called.length === 0 && idle.length === 0) {
+		emptyNote("mcp", "No MCP server reported in this session.");
+		return;
+	}
+	container.replaceChildren(
+		...called,
+		...idle,
+		total.costed
+			? el(
+					"div",
+					{ class: "empty-note" },
+					"Tokens: what the results added to each agent's context; credits: every later LLM call reading them. An estimate: tool spans carry no token count.",
+				)
+			: null,
+	);
+}
+
 function timelineRows(view) {
 	const rows = [];
 	for (const root of view.rootAgents) {
@@ -749,6 +1246,7 @@ function renderTimeline(view, now) {
 					title: label,
 					onclick: () => {
 						ui.agentKey = selected ? null : agent.key;
+						ui.link = null;
 						scheduleRender(true);
 					},
 				},
@@ -777,11 +1275,11 @@ function renderTimeline(view, now) {
 		}
 		for (const tool of agent.tools) {
 			track.append(
-				el("div", { class: "tl-tool", style: { left: x(tool.start) } }),
+				el("div", { class: `tl-tool${tool.mcp ? " mcp" : ""}`, style: { left: x(tool.start) } }),
 				el("div", {
 					class: "tl-hit",
 					style: { left: x(tool.start) },
-					tip: `tool · ${tool.name}${tool.summary ? `\n${tool.summary}` : ""}\n${formatDuration((tool.end ?? tool.start) - tool.start)}${tool.permission ? ` · ${tool.permission}` : ""}${tool.failed ? " · failed" : ""}`,
+					tip: `${tool.mcp ? `mcp · ${mcpLabel(tool.mcp)} · ${tool.mcp.tool}` : `tool · ${tool.name}`}${tool.summary ? `\n${tool.summary}` : ""}\n${formatDuration((tool.end ?? tool.start) - tool.start)}${tool.permission ? ` · ${tool.permission}` : ""}${tool.failed ? " · failed" : ""}${tool.mcp && tool.cost ? `\n${formatContext(tool.cost.tokens, tool.cost.credits)}` : ""}`,
 				}),
 			);
 		}
@@ -831,9 +1329,17 @@ function describeEntry(view, entry) {
 		cost = formatCredits(u.credits);
 	} else if (entry.type === "tool") {
 		const tool = entry.tool;
-		kind = "tool";
-		what = "tool";
-		detail = [tool.name, tool.summary, tool.permission, tool.failed ? "failed" : null, formatDuration((tool.end ?? tool.start) - tool.start)]
+		// An MCP call says so, with its server and what its result cost.
+		kind = tool.mcp ? "mcp" : "tool";
+		what = tool.mcp ? "mcp" : "tool";
+		detail = [
+			tool.mcp ? `${mcpLabel(tool.mcp)} · ${tool.mcp.tool}` : tool.name,
+			tool.summary,
+			tool.permission,
+			tool.failed ? "failed" : null,
+			formatDuration((tool.end ?? tool.start) - tool.start),
+			tool.mcp && tool.cost ? formatContext(tool.cost.tokens, tool.cost.credits) : null,
+		]
 			.filter(Boolean)
 			.join(" · ");
 	} else if (entry.type === "agent-start") {
@@ -1210,15 +1716,24 @@ function render() {
 	}
 	renderSessionPicker(views);
 	const view = views.find((candidate) => candidate.id === ui.sessionId) ?? null;
+	ui.session = view;
 	if (ui.agentKey && !view?.agents.has(ui.agentKey)) ui.agentKey = null;
+	if (ui.link) {
+		const keys = ui.link.keys.filter((key) => view?.agents.has(key));
+		ui.link = keys.length > 0 ? { kind: ui.link.kind, keys } : null;
+	}
 	ui.place = view ? placeOf(view, ui.workspaces) : null;
 	ui.routing = view ? routingFor(view, definitionsOf(ui.place?.workspace)) : [];
 	renderLive(view, now);
 	renderKpis(view);
 	renderFlow(view);
+	renderTools(view);
+	renderMessage(view);
+	if (ui.reveal) revealPanel();
 	renderProgress(view);
 	renderRouting(view);
 	renderCosts(view);
+	renderMcp(view);
 	renderTimeline(view, now);
 	renderLog(view);
 	renderStatusline(view);
@@ -1239,6 +1754,7 @@ $("session-select").addEventListener("change", (event) => {
 	ui.sessionId = event.target.value;
 	ui.follow = false;
 	ui.agentKey = null;
+	ui.link = null;
 	$("follow").checked = false;
 	scheduleRender(true);
 });
@@ -1247,6 +1763,69 @@ $("follow").addEventListener("change", (event) => {
 	ui.follow = event.target.checked;
 	scheduleRender(true);
 });
+
+/** Closes the side panel open, and gives the focus back to the card or the line it belongs to. */
+function closePanel() {
+	let origin = null;
+	if (ui.link) {
+		origin = flow.querySelector(`.hit[data-key="${CSS.escape(ui.link.keys[0])}"][data-kind="${ui.link.kind}"]`);
+		ui.link = null;
+	} else if (ui.agentKey) {
+		origin = flow.querySelector(`.card[data-key="${CSS.escape(ui.agentKey)}"]`);
+		ui.agentKey = null;
+	}
+	scheduleRender(true);
+	origin?.focus({ preventScroll: true });
+}
+
+$("tools-close").addEventListener("click", closePanel);
+$("message-close").addEventListener("click", closePanel);
+document.addEventListener("keydown", (event) => {
+	if (event.key === "Escape" && ui.view === "live" && (ui.agentKey || ui.link)) closePanel();
+});
+
+// A line clicked shows its messages: on a stretch that several agents' lines share, all of theirs.
+const hitAt = (event) => (event.target instanceof Element ? event.target.closest(".hit") : null);
+const linesUnder = (event, hit) => linkLayer.linesAt(event.clientX, event.clientY) ?? { kind: hit.dataset.kind, keys: [hit.dataset.key] };
+
+flow.addEventListener("click", (event) => {
+	const hit = hitAt(event);
+	if (!hit) return;
+	const { kind, keys } = linesUnder(event, hit);
+	selectLines(kind, keys);
+});
+flow.addEventListener("mousemove", (event) => {
+	const hit = hitAt(event);
+	if (!hit) {
+		linkLayer.hover(null);
+		return;
+	}
+	const lines = linesUnder(event, hit);
+	linkLayer.hover(lines);
+	// Read by the tooltip, which listens further up.
+	if (ui.session) hit.dataset.tip = describeLines(ui.session, lines.kind, lines.keys);
+});
+flow.addEventListener("mouseleave", () => linkLayer.hover(null));
+// From the keyboard, a line is one agent's: Tab reaches each in turn.
+flow.addEventListener("keydown", (event) => {
+	const hit = hitAt(event);
+	if (hit && (event.key === "Enter" || event.key === " ")) {
+		event.preventDefault();
+		selectLines(hit.dataset.kind, [hit.dataset.key]);
+	}
+});
+for (const button of document.querySelectorAll("#message-panel [data-direction]")) {
+	button.addEventListener("click", () => {
+		if (!ui.link) return;
+		ui.link = { kind: button.dataset.direction, keys: ui.link.keys };
+		scheduleRender(true);
+	});
+}
+
+// The tool calls stay in view below the top bar, whose height changes as it wraps.
+new ResizeObserver(([entry]) => {
+	document.documentElement.style.setProperty("--topbar", `${Math.ceil(entry.target.getBoundingClientRect().height)}px`);
+}).observe(document.querySelector(".topbar"));
 
 const tooltip = $("tooltip");
 document.addEventListener("mousemove", (event) => {
@@ -1287,6 +1866,19 @@ async function refreshStatus() {
 	}
 }
 
+async function refreshMcpNames() {
+	try {
+		const names = await getJson("/api/mcp");
+		if (JSON.stringify(names) === JSON.stringify(ui.mcpNames)) return;
+		ui.mcpNames = names;
+		// Every session is derived again, its servers named.
+		summaries.clear();
+		scheduleRender();
+	} catch {
+		// Kept from the last refresh: servers show by their hash meanwhile.
+	}
+}
+
 async function refreshWorkspaces() {
 	try {
 		ui.workspaces = await getJson("/api/workspaces");
@@ -1315,8 +1907,9 @@ async function start() {
 	} catch {
 		ui.pricing = null;
 	}
-	await Promise.all([refreshStatus(), refreshWorkspaces()]);
+	await Promise.all([refreshStatus(), refreshWorkspaces(), refreshMcpNames()]);
 	setInterval(refreshWorkspaces, 30_000);
+	setInterval(refreshMcpNames, 30_000);
 	setInterval(() => {
 		if (ui.view === "history") refreshHistory();
 	}, 15_000);

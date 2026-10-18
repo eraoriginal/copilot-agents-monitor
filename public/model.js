@@ -137,6 +137,130 @@ function addUsage(totals, usage) {
 	}
 }
 
+/** What a token weighs in a call's price, relative to an uncached input token: list prices' ratios. */
+export const TOKEN_WEIGHTS = { input: 1, cacheRead: 0.1, cacheWrite: 1.25, output: 5 };
+
+/** A call's tokens, each counted at its weight: what the call's price is spread over. */
+export function weightedTokens(usage) {
+	const uncached = Math.max(0, usage.input - usage.cacheRead - usage.cacheWrite);
+	return (
+		uncached * TOKEN_WEIGHTS.input +
+		usage.cacheRead * TOKEN_WEIGHTS.cacheRead +
+		usage.cacheWrite * TOKEN_WEIGHTS.cacheWrite +
+		usage.output * TOKEN_WEIGHTS.output
+	);
+}
+
+/**
+ * What tool results cost in tokens. Tool spans carry no token count, but a result enters the
+ * agent's context with its next LLM call and is sent again with every call after. Its tokens are
+ * the growth of that next call's input over the previous call's input and output, shared among
+ * the tool calls of that round: by the size of their results when each is known, evenly
+ * otherwise. The first call reads them as fresh input, later ones from the cache; each read is
+ * priced at the rate its call was billed, per weighted token. Sets `tool.cost`, an estimate:
+ * `{ tokens, reads, credits, shared }`, or leaves it null when no later call has read the result.
+ */
+export function estimateToolCosts(agent) {
+	const calls = [...agent.calls].sort((x, y) => x.start - y.start);
+	const sizeOf = (value) => (typeof value === "string" ? value : JSON.stringify(value) ?? "").length;
+	for (let index = 0; index + 1 < calls.length; index += 1) {
+		const before = calls[index];
+		const after = calls[index + 1];
+		const round = agent.tools.filter(
+			(tool) => tool.start >= (before.end ?? before.start) - 50 && (tool.end ?? tool.start) <= after.start + 50,
+		);
+		if (round.length === 0) continue;
+		const growth = Math.max(0, after.usage.input - before.usage.input - before.usage.output);
+		const sizes = round.map((tool) => (tool.result == null ? null : sizeOf(tool.result)));
+		const bySize = sizes.every((size) => size != null) && sizes.some((size) => size > 0);
+		const total = bySize ? sizes.reduce((sum, size) => sum + size, 0) : round.length;
+		const readers = calls.slice(index + 1);
+		for (const [position, tool] of round.entries()) {
+			const tokens = Math.round((growth * (bySize ? sizes[position] : 1)) / total);
+			let credits = 0;
+			let priced = true;
+			for (const [order, call] of readers.entries()) {
+				if (call.usage.credits == null) {
+					priced = false;
+					continue;
+				}
+				const rate = call.usage.credits / Math.max(1, weightedTokens(call.usage));
+				credits += tokens * (order === 0 ? TOKEN_WEIGHTS.input : TOKEN_WEIGHTS.cacheRead) * rate;
+			}
+			tool.cost = { tokens, reads: readers.length, credits: priced ? credits : null, shared: round.length > 1 && !bySize };
+		}
+	}
+}
+
+// ---------------------------------------------------------------------------------------------
+// MCP servers. Copilot reports a server's name as its SHA-256, in clear only with content
+// capture; `names` maps the hashes the monitor could work out back to names.
+
+const SHA256 = /^[0-9a-f]{64}$/;
+
+/** A server's name from what a span carries: the name itself, or a hash `names` knows. */
+export function mcpServerName(value, names) {
+	if (typeof value !== "string" || value === "") return null;
+	return SHA256.test(value) ? (names?.[value] ?? null) : value;
+}
+
+/**
+ * The MCP server and tool behind a tool call, or null for a built-in tool: from Copilot's
+ * `github.copilot.tool.parameters.mcp_*` attributes, `gen_ai.tool.type` "extension", or VS Code's
+ * `mcp_<server>_<tool>` names.
+ */
+export function mcpOf(span, names) {
+	const a = span.attributes ?? {};
+	const raw = a["github.copilot.tool.parameters.mcp_server_name"];
+	const hash = a["github.copilot.tool.parameters.mcp_server_name_hash"];
+	const tool = a["github.copilot.tool.parameters.mcp_tool_name"];
+	const name = a["gen_ai.tool.name"] ?? span.name.replace(/^execute_tool\s*/, "");
+	const named = /^mcp_{1,2}([^_]+?)_{1,2}(.+)$/.exec(name);
+	if (!raw && !hash && !tool && a["gen_ai.tool.type"] !== "extension" && !named) return null;
+	return {
+		server: mcpServerName(raw, names) ?? mcpServerName(hash, names) ?? named?.[1] ?? null,
+		hash: typeof hash === "string" && SHA256.test(hash) ? hash : null,
+		tool: tool ?? named?.[2] ?? name,
+	};
+}
+
+/** What to call a server: its name, or the start of its hash when no name is known. */
+export function mcpLabel({ server, hash }) {
+	return server ?? (hash ? `server ${hash.slice(0, 7)}` : "unknown server");
+}
+
+/** MCP use by server: calls, failures, the tools called, the agents, what the results cost. */
+function mcpByServer(tools) {
+	const servers = new Map();
+	for (const tool of tools) {
+		if (!tool.mcp) continue;
+		const key = tool.mcp.server ?? tool.mcp.hash ?? "?";
+		const entry = servers.get(key) ?? {
+			key,
+			server: tool.mcp.server,
+			hash: tool.mcp.hash,
+			calls: 0,
+			failed: 0,
+			tools: new Map(),
+			agents: new Set(),
+			tokens: 0,
+			credits: 0,
+			costed: 0,
+		};
+		entry.calls += 1;
+		if (tool.failed) entry.failed += 1;
+		entry.tools.set(tool.mcp.tool, (entry.tools.get(tool.mcp.tool) ?? 0) + 1);
+		entry.agents.add(tool.agentKey);
+		if (tool.cost) {
+			entry.tokens += tool.cost.tokens;
+			entry.credits += tool.cost.credits ?? 0;
+			entry.costed += 1;
+		}
+		servers.set(key, entry);
+	}
+	return [...servers.values()].sort((x, y) => y.calls - x.calls || x.key.localeCompare(y.key));
+}
+
 // ---------------------------------------------------------------------------------------------
 // Tool arguments, when content capture or hooks provide them.
 
@@ -171,7 +295,84 @@ export function summarizeArguments(args) {
 		if (typeof args[key] === "string" && args[key].length > 0) parts.push(args[key]);
 		if (parts.length === 2) break;
 	}
+	// Arguments of no known shape, as MCP tools take (`issueIdOrKey`, `pageId`…): the first ones.
+	if (parts.length === 0) {
+		for (const value of Object.values(args)) {
+			if ((typeof value === "string" && value.length > 0) || typeof value === "number") parts.push(String(value));
+			if (parts.length === 2) break;
+		}
+	}
 	return parts.join(" · ").slice(0, 160);
+}
+
+/** What a tool span says about the call besides its name, even with content capture off. */
+export function toolFacts(span) {
+	const a = span.attributes ?? {};
+	const facts = [];
+	const add = (label, value) => {
+		if (value != null && value !== "") facts.push([label, String(value)]);
+	};
+	add("skill", a["gen_ai.skill.name"]);
+	add("resource", a["gen_ai.skill.resource.name"]);
+	add("process", a["process.executable.name"]);
+	add("exit code", a["process.exit.code"]);
+	add("error", a["error.type"] ?? (span.status?.code === 2 ? span.status.message || "failed" : null));
+	const sandbox = span.events?.find((event) => event.name === "github.copilot.sandbox.enforcement_state");
+	add("sandbox", sandbox?.attributes?.["github.copilot.sandbox.outcome"]);
+	return facts;
+}
+
+/**
+ * The text of a message, whatever carries it: a string, OpenTelemetry GenAI messages
+ * (`[{ role, parts: [{ type: "text", content }] }]`), or a tool result (`{ content: [{ text }] }`,
+ * `{ textResultForLlm }`…). With `role`, only that role's messages count. Null when no text.
+ */
+export function messageText(value, role = null) {
+	if (value == null) return null;
+	if (typeof value === "string") return value.trim() ? value : null;
+	if (typeof value !== "object") return String(value);
+	if (Array.isArray(value)) {
+		const messages = role && value.some((item) => item?.role) ? value.filter((item) => item?.role === role) : value;
+		const texts = messages.map((item) => messageText(item)).filter(Boolean);
+		return texts.length > 0 ? texts.join("\n\n") : null;
+	}
+	if (Array.isArray(value.parts)) {
+		return messageText(value.parts.filter((part) => part?.type == null || part.type === "text").map((part) => part.content ?? part.text));
+	}
+	for (const key of ["content", "text", "textResultForLlm", "result", "output", "response"]) {
+		const text = messageText(value[key]);
+		if (text) return text;
+	}
+	return null;
+}
+
+const PROMPT_KEYS = ["prompt", "message", "task", "instructions"];
+
+/**
+ * What an agent was sent by the agent that launched it, and what it sent back: from the arguments
+ * and the result of the call that launched it, or from the messages on its own span. Either needs
+ * hooks or content capture; without them, only the brief's description may be known.
+ */
+export function handoffOf(agent) {
+	const tool = agent.launchTool;
+	const args = tool?.args;
+	const fields = args && typeof args === "object" && !Array.isArray(args) ? args : {};
+	const promptKey = PROMPT_KEYS.find((key) => typeof fields[key] === "string" && fields[key].trim());
+	const result = tool?.result;
+	return {
+		sent: {
+			at: tool?.start ?? (Number.isFinite(agent.start) ? agent.start : null),
+			title: typeof fields.description === "string" ? fields.description : null,
+			text: (promptKey ? fields[promptKey] : null) ?? messageText(agent.input, "user") ?? (typeof args === "string" ? args : null),
+			fields: Object.entries(fields)
+				.filter(([key, value]) => key !== promptKey && key !== "description" && value != null && typeof value !== "object")
+				.map(([key, value]) => [key, String(value)]),
+		},
+		returned: {
+			at: agent.done ? (agent.end ?? tool?.end ?? null) : null,
+			text: messageText(result) ?? messageText(agent.output, "assistant") ?? (result != null ? JSON.stringify(result, null, 2) : null),
+		},
+	};
 }
 
 /** A todo list from any tool input that holds one: VS Code's `todoList`, or a `todos` array. */
@@ -209,6 +410,10 @@ function newAgent(key, fields) {
 		root: null,
 		parentKey: null,
 		launchCallId: null,
+		// The `task` call that launched it, and the messages on its own span (content capture).
+		launchTool: null,
+		input: null,
+		output: null,
 		brief: null,
 		models: new Set(),
 		totals: emptyTotals(),
@@ -218,11 +423,23 @@ function newAgent(key, fields) {
 		calls: [],
 		tools: [],
 		children: [],
+		// MCP servers it could call, as its own span lists them, and what it called, by server.
+		mcpAvailable: [],
+		mcp: [],
 		...fields,
 	};
 }
 
-export function deriveSession(session, { now = Date.now(), pricing = null } = {}) {
+/** The servers an agent's span says it could call: `github.copilot.context.mcp_server_names`. */
+function availableServers(value, names) {
+	const list = parseArguments(value);
+	if (!Array.isArray(list)) return [];
+	return list
+		.filter((item) => typeof item === "string" && item)
+		.map((item) => ({ server: mcpServerName(item, names), hash: SHA256.test(item) ? item : null }));
+}
+
+export function deriveSession(session, { now = Date.now(), pricing = null, mcpNames = null } = {}) {
 	const spans = [...session.spans.values()];
 	const byId = session.spans;
 	const agents = new Map();
@@ -237,7 +454,8 @@ export function deriveSession(session, { now = Date.now(), pricing = null } = {}
 		agents.set(
 			span.spanId,
 			newAgent(span.spanId, {
-				name: a["gen_ai.agent.name"] ?? span.name.replace(/^invoke_agent\s*/, ""),
+				// Copilot's default agent comes as a bare `invoke_agent`: no name, named further down.
+				name: a["gen_ai.agent.name"] || span.name.replace(/^invoke_agent\s*/, "") || null,
 				description: a["gen_ai.agent.description"] ?? null,
 				type: a["github.copilot.agent.type"] ?? null,
 				start: span.start,
@@ -246,6 +464,9 @@ export function deriveSession(session, { now = Date.now(), pricing = null } = {}
 				done: true,
 				status: span.status?.code === 2 ? "failed" : "done",
 				parentSpanId: span.parentSpanId,
+				input: parseArguments(a["gen_ai.input.messages"]),
+				output: parseArguments(a["gen_ai.output.messages"]),
+				mcpAvailable: availableServers(a["github.copilot.context.mcp_server_names"], mcpNames),
 				ownTotals: {
 					input: a["gen_ai.usage.input_tokens"] ?? 0,
 					output: a["gen_ai.usage.output_tokens"] ?? 0,
@@ -294,11 +515,18 @@ export function deriveSession(session, { now = Date.now(), pricing = null } = {}
 				callId: a["gen_ai.tool.call.id"] ?? null,
 				args,
 				summary: summarizeArguments(args),
+				result: parseArguments(a["gen_ai.tool.call.result"]),
+				facts: toolFacts(span),
+				mcp: mcpOf(span, mcpNames),
+				// What its result cost once read by the agent's next LLM calls: see estimateToolCosts.
+				cost: null,
 				failed: span.status?.code === 2 || Boolean(a["error.type"]),
 				start: span.start,
 				end: span.end,
 				agentKey: agent.key,
 				permission: null,
+				// The agent a `task` call started, once known.
+				launchedKey: null,
 			};
 			agent.tools.push(tool);
 			agent.toolCount += 1;
@@ -340,6 +568,7 @@ export function deriveSession(session, { now = Date.now(), pricing = null } = {}
 				tool.args = args;
 				tool.summary = summarizeArguments(args);
 			}
+			if (tool && name === "PostToolUse") tool.result ??= parseArguments(event.tool_response ?? event.toolResult);
 			if (!tool) {
 				log.push({
 					time: event.time,
@@ -349,6 +578,12 @@ export function deriveSession(session, { now = Date.now(), pricing = null } = {}
 				});
 			}
 		}
+	}
+
+	// What tool results cost, now that hooks have added the results spans leave out; MCP by server.
+	for (const agent of agents.values()) {
+		estimateToolCosts(agent);
+		agent.mcp = mcpByServer(agent.tools);
 	}
 
 	// 4. Who started whom. A subagent's span is a child of the `task` call that started it.
@@ -361,6 +596,10 @@ export function deriveSession(session, { now = Date.now(), pricing = null } = {}
 			agent.launchCallId = launcher.attributes?.["gen_ai.tool.call.id"] ?? null;
 			if (parent) agent.parentKey = parent.key;
 			const tool = agent.launchCallId ? toolsByCallId.get(agent.launchCallId) : null;
+			if (tool) {
+				tool.launchedKey = agent.key;
+				agent.launchTool = tool;
+			}
 			if (tool?.args) agent.brief = summarizeArguments(tool.args);
 		}
 	}
@@ -462,6 +701,11 @@ export function deriveSession(session, { now = Date.now(), pricing = null } = {}
 		agents.set(agent.key, agent);
 		all.push(agent);
 		if (root) root.children.push(agent.key);
+		const launch = toolsByCallId.get(hook.id);
+		if (launch) {
+			launch.launchedKey ??= agent.key;
+			agent.launchTool = launch;
+		}
 	}
 
 	// 6. Session totals.
@@ -500,6 +744,18 @@ export function deriveSession(session, { now = Date.now(), pricing = null } = {}
 		}
 	}
 
+	// MCP across the session: what was called, and what the agents could have called.
+	const mcp = mcpByServer(all.flatMap((agent) => agent.tools));
+	const mcpAvailable = new Map();
+	for (const agent of all) {
+		for (const entry of agent.mcpAvailable) {
+			const key = entry.server ?? entry.hash;
+			const known = mcpAvailable.get(key) ?? { key, ...entry, agents: new Set() };
+			known.agents.add(agent.key);
+			mcpAvailable.set(key, known);
+		}
+	}
+
 	const lastActivityAt = Math.max(session.lastAt, ...all.map((agent) => agent.lastActivity));
 	return {
 		id: session.id,
@@ -520,6 +776,8 @@ export function deriveSession(session, { now = Date.now(), pricing = null } = {}
 		totals,
 		byModel,
 		toolCount,
+		mcp,
+		mcpAvailable: [...mcpAvailable.values()],
 		turns: rootAgents.length,
 		todos,
 		log,

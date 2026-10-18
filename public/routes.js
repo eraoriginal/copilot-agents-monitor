@@ -129,3 +129,30 @@ export function pathData(points, radius = 7) {
 export function lengthOf(points) {
 	return points.slice(1).reduce((sum, point, i) => sum + distance(points[i], point), 0);
 }
+
+/** The polyline shortened by `length` at each end: what is laid over it stops short of the cards. */
+export function trim(points, length) {
+	if (points.length < 2 || lengthOf(points) <= 4 * length) return points;
+	const out = [...points];
+	const last = points.length - 1;
+	out[0] = toward(points[0], points[1], Math.min(length, distance(points[0], points[1])));
+	out[last] = toward(points[last], points[last - 1], Math.min(length, distance(points[last], points[last - 1])));
+	return out;
+}
+
+/**
+ * How far `point` lies from the polyline `points`. Lines that share a stretch lie at the same
+ * distance from a point on it: this is how a click on that stretch finds every one of them.
+ */
+export function distanceTo(points, point) {
+	let best = Number.POSITIVE_INFINITY;
+	for (let i = 1; i < points.length; i += 1) {
+		const a = points[i - 1];
+		const dx = points[i].x - a.x;
+		const dy = points[i].y - a.y;
+		const squared = dx * dx + dy * dy;
+		const t = squared ? Math.max(0, Math.min(1, ((point.x - a.x) * dx + (point.y - a.y) * dy) / squared)) : 0;
+		best = Math.min(best, Math.hypot(point.x - (a.x + t * dx), point.y - (a.y + t * dy)));
+	}
+	return best;
+}

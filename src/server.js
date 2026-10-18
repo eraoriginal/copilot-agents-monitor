@@ -27,6 +27,7 @@ import { parseArgs } from "node:util";
 import { gunzipSync, inflateSync } from "node:zlib";
 import { DEFAULTS, dataDir } from "./config.js";
 import { createHistory } from "./history.js";
+import { createMcpNames } from "./mcp.js";
 import { flattenLogs, flattenTraces } from "./otlp.js";
 import { appendRecord, purgeOldDays, readRecentDays, tailDayFile } from "./store.js";
 import { createWorkspaceRegistry } from "./workspaces.js";
@@ -81,6 +82,8 @@ function hookEnvelope(record) {
 // The workspaces and the session history; the demo brings its own of both.
 let workspaces = null;
 let history = null;
+// The names of the MCP servers, by the SHA-256 Copilot reports them as.
+let mcpNames = null;
 
 /** `live`: an event as it arrives, which the history also takes; not one reloaded at start. */
 function publish(envelope, { live = true } = {}) {
@@ -275,6 +278,7 @@ function handleUi(request, response) {
 	if (pathname === "/api/config") return sendJson(response, 200, pricing);
 	if (pathname === "/api/workspaces") return sendJson(response, 200, workspaces?.list() ?? []);
 	if (pathname === "/api/history") return sendJson(response, 200, history?.list() ?? []);
+	if (pathname === "/api/mcp") return sendJson(response, 200, mcpNames?.table() ?? {});
 	return serveStatic(request, response);
 }
 
@@ -320,12 +324,15 @@ if (args.demo) {
 	const workspace = demo.demoWorkspace(start);
 	workspaces = { list: () => [workspace], addFolder() {} };
 	history = createHistory({ dataDir: demoDir, workspaces, pricing });
+	// The demo names its servers from the known names alone, whatever this machine configures.
+	mcpNames = createMcpNames({ configs: false });
 	for (const envelope of demo.demoEnvelopes(start)) {
 		setTimeout(() => publish(envelope), Math.max(0, envelope.time - start));
 	}
 } else {
 	workspaces = createWorkspaceRegistry({ dataDir: dir, extraFolders: args.workspace });
 	history = createHistory({ dataDir: dir, workspaces, pricing });
+	mcpNames = createMcpNames({ folders: () => workspaces.list().map((workspace) => workspace.path) });
 	const { recorded, published } = loadRecorded(Number(args.days), Number(args.retention));
 	console.log(
 		`[agent-monitor] Loaded ${published} event(s) for the page and ${recorded} for the history from ${dir}; ${workspaces.list().length} workspace(s) found.`,
