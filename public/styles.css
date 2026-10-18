@@ -1722,12 +1722,15 @@ button.link {
 }
 
 /* The message a line carries: the brief sent down it, or the answer sent back up. */
+/* Neither shrinks when the messages below overflow: the body scrolls instead. */
 .message-tabs {
+	flex: none;
 	align-self: flex-start;
 	margin-bottom: 10px;
 }
 
 .message-route {
+	flex: none;
 	display: flex;
 	flex-wrap: wrap;
 	align-items: baseline;
