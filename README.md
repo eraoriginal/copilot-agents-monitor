@@ -6,6 +6,8 @@ agents are working right now, what each one calls, the tokens and the cost, turn
 It works for every workspace at once. One local process receives what VS Code reports and
 serves the page; nothing leaves the machine.
 
+![A conductor run, live: three scouts launched side by side, their answers coming back, then the designers](docs/media/live.gif)
+
 ```bash
 npm start          # or: pnpm start
 ```
@@ -33,6 +35,8 @@ Optional: `npm run install-hooks` shows a hook file for `~/.copilot/hooks/`, and
 it. See [Hooks](#hooks) for what they add and their status.
 
 ## What the page shows
+
+![The live view in the middle of a run: totals, the orchestration tree, progress, routing and costs](docs/media/overview.png)
 
 **Live**, one session at a time:
 
@@ -63,6 +67,8 @@ it. See [Hooks](#hooks) for what they add and their status.
   every agent the line leads to, a click on the branch into one card that agent's only. Pointing
   at a line lights up every agent's line that runs there. `sent` and `sent back` switch direction;
   the names lead to each agent's tool calls. The tool calls panel links to an agent's messages too.
+
+  ![The shared line out of the conductor lists the nine prompts it carried; the branch into one scout, that scout's; sent back, its answer](docs/media/messages.gif)
 - **Tool calls**, for the agent you click: how many of each tool, then every call in order, with
   when it started into the agent's run, how long it took and how it ended. Open a call for its
   call id, permission, skill, process and exit code, the agent a `task` call launched (click it to
@@ -70,6 +76,8 @@ it. See [Hooks](#hooks) for what they add and their status.
   Above the calls, the agent's MCP use: each server it called, how often, which tools, what the
   results cost, and the servers it could have called and did not. An MCP call shows its server
   and tool, and the tokens its result added. `Esc` closes the panel.
+
+  ![A scout's tool calls: its Atlassian calls and what they cost, then each call, one opened](docs/media/tool-calls.png)
 - **Progress**: the agent's todo list when one is reported, otherwise subagents done.
 - **Routing**: each agent's model against the ones its `.agent.md` declares — as declared, on a
   fallback, off its list, or no model declared — and what the session would have cost had every
@@ -78,6 +86,8 @@ it. See [Hooks](#hooks) for what they add and their status.
 - **MCP servers**: each server called in the session (GitHub's, Atlassian's or another), how
   often, by which agents, and what the results cost; then the servers the agents could call and
   did not. Each card names the servers its agent called, with their count and cost.
+
+  ![The MCP servers of a run: Atlassian's and GitHub's, their calls, the agents that made them, the tokens and credits](docs/media/mcp.png)
 - **Timeline**: one row per agent, its LLM calls and tool calls in time, MCP calls in their own
   colour.
 - **Session log**: every call as it arrives.
@@ -99,6 +109,8 @@ moves when the system asks for reduced motion.
 - **Cost by ticket** and **by agent** over the period.
 - **Sessions**: each one with its ticket, workspace, cost; `open` shows it live while its events
   are still loaded.
+
+![The history: tickets with their sessions, agent time, cost and saving; cost by ticket and by agent](docs/media/history.png)
 
 A session enters the history once it has been quiet for 30 seconds.
 
@@ -224,6 +236,13 @@ No dependencies. Node 20.19 or later.
 npm test
 ```
 
+The screenshots and GIFs under `docs/media` come from the demo, played in a headless Chrome or
+Edge (Node 22 or later, and ffmpeg for the GIFs). After a change to the page, take them again:
+
+```bash
+npm run capture
+```
+
 | Path | Role |
 |---|---|
 | `src/server.js` | the OTLP receiver, the hook file tail, the page and its event stream |
@@ -242,3 +261,4 @@ npm test
 | `public/routes.js` | where the lines between a parent and its agents run, and which lines pass by a point: plain geometry |
 | `public/links.js` | measures the cards, draws the lines in one SVG under them and their click targets over them |
 | `src/demo.js` | the `--demo` run |
+| `scripts/capture.mjs` | the README's screenshots and GIFs, taken from the demo |

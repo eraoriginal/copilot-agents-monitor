@@ -14,6 +14,7 @@
 		"start": "node src/server.js",
 		"demo": "node src/server.js --demo",
 		"install-hooks": "node src/installHooks.js",
+		"capture": "node scripts/capture.mjs",
 		"test": "node --test"
 	}
 }
