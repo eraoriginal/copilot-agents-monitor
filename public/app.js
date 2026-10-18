@@ -10,7 +10,7 @@ import {
 import { createStore, deriveSession, handoffOf, ingest, mcpLabel } from "./model.js";
 import { countTo, flash, motionAllowed, reconcile, sendPacket, typeInto } from "./motion.js";
 import { createLinkLayer } from "./links.js";
-import { childrenOf, groupWaves, launchOf } from "./tree.js";
+import { childrenOf, groupWaves, launchOf, readerOf, turnTag, turnTitle } from "./tree.js";
 import { counterfactual, routingFor } from "./routing.js";
 import { definitionsOf, placeOf } from "./workspaces.js";
 
@@ -331,12 +331,15 @@ function updateCard(card, agent, isNew) {
 	refs.name.textContent = agent.unnamed ? `${agent.label} · identifying…` : agent.label;
 	// A root agent shows its turn; any other shows who launched it and how far into that turn.
 	refs.tag.textContent = agent.root
-		? `turn ${agent.turn}`
+		? turnTag(agent)
 		: agent._launcher
 			? `↳ ${agent._launcher}${agent._offset ? ` · ${agent._offset}` : ""}`
 			: "";
+	// Where its answer is read, when that is not the agent that launched it: the lines are drawn from this.
+	if (agent.returnKey && agent.returnKey !== agent.parentKey) card.dataset.returnTo = agent.returnKey;
+	else delete card.dataset.returnTo;
 	refs.tag.title = agent.root
-		? `Turn ${agent.turn} of the conversation`
+		? turnTitle(agent)
 		: agent._launcher
 			? `Launched by ${agent._launcher}${agent._offset ? `, ${agent._offset} into its turn` : ""}`
 			: "";
@@ -511,7 +514,11 @@ function renderFlow(view) {
 	const items = [...view.rootAgents];
 	const orphans = view.subagents.filter((agent) => !agent.parentKey);
 	if (orphans.length) items.push({ key: "orphans", virtual: true, children: orphans.map((agent) => agent.key), start: orphans[0].start });
-	reconcile(turns, items, (item) => item.key, createTurn, (turn, item) => updateNode(turn._node, view, item, now));
+	reconcile(turns, items, (item) => item.key, createTurn, (turn, item) => {
+		// A run started to read its predecessor's subagents continues that turn: no divider between them.
+		turn.classList.toggle("resume", Boolean(item.resumeOf));
+		updateNode(turn._node, view, item, now);
+	});
 
 	// The lines are drawn once the cards are in place.
 	const routes = linkLayer.update({
@@ -762,7 +769,7 @@ function renderTools(view) {
 
 	// Rebuilt only when it changes: its buttons must outlive a click.
 	const launched = Boolean(agent.parentKey && view.agents.has(agent.parentKey));
-	const head = [agent.label, agent.status, formatDuration(agent.durationMs), agent.turn, agent._launcher, launched].join("|");
+	const head = [agent.label, agent.status, formatDuration(agent.durationMs), agent.turn, agent.resumeOf, agent._launcher, launched].join("|");
 	if ($("tools-agent").dataset.signature !== head) {
 		$("tools-agent").dataset.signature = head;
 		replace(
@@ -770,7 +777,7 @@ function renderTools(view) {
 			el("span", { class: "tools-agent-name" }, agent.label),
 			el("span", { class: `status ${agent.status}` }, `${STATUS_MARK[agent.status] ?? "·"} ${agent.status}`),
 			el("span", { class: "muted" }, formatDuration(agent.durationMs)),
-			agent.root ? el("span", { class: "muted" }, `turn ${agent.turn}`) : agent._launcher ? el("span", { class: "muted" }, `↳ ${agent._launcher}`) : null,
+			agent.root ? el("span", { class: "muted", title: turnTitle(agent) }, turnTag(agent)) : agent._launcher ? el("span", { class: "muted" }, `↳ ${agent._launcher}`) : null,
 			// The messages on its lines, for whoever cannot point at a line.
 			launched
 				? el(
@@ -837,12 +844,12 @@ function agentButton(agent) {
 /** Who sends to whom along lines of one direction, and what a click on them shows. */
 function describeLines(view, kind, keys) {
 	const agents = keys.map((key) => view.agents.get(key)).filter(Boolean);
-	const parent = agents[0] ? view.agents.get(agents[0].parentKey) : null;
+	const parent = agents[0] ? (kind === "ret" ? readerOf(view, agents[0]) : view.agents.get(agents[0].parentKey)) : null;
 	if (!parent) return "";
 	const names = agents.map((agent) => agent.label).join(", ");
 	const many = agents.length > 1;
 	return kind === "ret"
-		? `${names} → ${parent.label}\nclick to read ${many ? `the ${agents.length} answers` : "what it sent back"}`
+		? `${names} → ${parent.label}${parent.resumeOf ? ` (${turnTag(parent)})` : ""}\nclick to read ${many ? `the ${agents.length} answers` : "what it sent back"}`
 		: `${parent.label} → ${names}\nclick to read ${many ? `the ${agents.length} messages sent` : "what it was sent"}`;
 }
 
@@ -908,7 +915,9 @@ function renderMessage(view) {
 	}
 	const items = agents.map((agent) => {
 		const { sent, returned } = handoffOf(agent);
-		return { agent, parent: view.agents.get(agent.parentKey), message: back ? returned : sent };
+		const parent = view.agents.get(agent.parentKey);
+		// Whoever reads the answer: the launcher, or the run started to read it.
+		return { agent, parent, target: back ? (readerOf(view, agent) ?? parent) : parent, message: back ? returned : sent };
 	});
 	const single = items.length === 1;
 	$("message-meta").textContent = single
@@ -921,15 +930,15 @@ function renderMessage(view) {
 	const signature = [
 		view.id,
 		ui.link.kind,
-		...items.map(({ agent, parent, message }) =>
-			[agent.key, agent.label, agent.status, agent._offset, parent.label, message.title, message.text, Boolean(agent.launchTool)].join("\u0001"),
+		...items.map(({ agent, parent, target, message }) =>
+			[agent.key, agent.label, agent.status, agent._offset, parent.label, target.key, message.title, message.text, Boolean(agent.launchTool)].join("\u0001"),
 		),
 	].join("\u0000");
 	if (messageMemory.signature === signature) return;
 	messageMemory.signature = signature;
 
 	// The route: the launcher and every agent its line reaches, or those agents and the launcher.
-	const launchers = [...new Set(items.map((item) => item.parent))].flatMap((parent, index) => [index > 0 ? ", " : null, agentButton(parent)]);
+	const launchers = [...new Set(items.map((item) => item.target))].flatMap((parent, index) => [index > 0 ? ", " : null, agentButton(parent)]);
 	const reached = el("span", { class: "message-agents" }, items.flatMap(({ agent }, index) => [index > 0 ? ", " : null, agentButton(agent)]));
 	const arrow = el("span", { class: "message-arrow", "aria-label": "to" }, "→");
 	replace("message-route", back ? [reached, arrow, ...launchers] : [...launchers, arrow, reached]);
@@ -1237,7 +1246,7 @@ function renderTimeline(view, now) {
 	const grid = el("div", { class: "timeline" });
 	for (const agent of timelineRows(view)) {
 		const selected = ui.agentKey === agent.key;
-		const label = agent.root ? `${agent.label} · t${agent.turn}` : `└ ${agent.label}`;
+		const label = agent.root ? `${agent.label} · ${turnTag(agent, true)}` : `└ ${agent.label}`;
 		grid.append(
 			el(
 				"div",
@@ -1345,7 +1354,7 @@ function describeEntry(view, entry) {
 	} else if (entry.type === "agent-start") {
 		kind = "agent";
 		what = "start";
-		detail = entry.agent.root ? `turn ${entry.agent.turn}` : `delegated${entry.agent.brief ? ` · ${entry.agent.brief}` : ""}`;
+		detail = entry.agent.root ? turnTag(entry.agent) : `delegated${entry.agent.brief ? ` · ${entry.agent.brief}` : ""}`;
 	} else if (entry.type === "agent-end") {
 		kind = "agent";
 		what = entry.agent.status;

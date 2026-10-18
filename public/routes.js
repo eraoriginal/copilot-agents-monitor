@@ -61,9 +61,11 @@ export function tidy(points) {
  * `parent`: the parent's card. `kids`: the block holding its children, rails and lanes included.
  * `cells`: each child's cell, `{ key, left, right, top, bottom, card }`, where `card` is the
  * child's own card (a cell holds the card and, below it, the child's own children).
- * Returns key → `{ launch, ret }`, each a list of points.
+ * `readers`: for a child whose answer is read by another card below the block, that card's box
+ * (a run of the parent started to read it): the return goes on down the right rail and into the
+ * top of that card. Returns key → `{ launch, ret }`, each a list of points.
  */
-export function routesFor({ parent, kids, cells }, spacing = SPACING) {
+export function routesFor({ parent, kids, cells, readers = new Map() }, spacing = SPACING) {
 	const routes = new Map();
 	if (cells.length === 0) return routes;
 	const rows = rowsOf(cells);
@@ -91,10 +93,16 @@ export function routesFor({ parent, kids, cells }, spacing = SPACING) {
 				{ x: lane, y: cell.card.cy },
 				{ x: lane, y: returnY },
 				{ x: railRight, y: returnY },
-				{ x: railRight, y: turnY },
-				{ x: portIn, y: turnY },
-				{ x: portIn, y: parent.bottom },
 			];
+			const reader = readers.get(cell.key);
+			if (reader && reader.top - spacing.stem > returnY) {
+				// On down the rail, then over the reader's port and into the top of its card.
+				const arriveY = reader.top - spacing.stem;
+				const readerPort = reader.cx + spacing.port;
+				ret.push({ x: railRight, y: arriveY }, { x: readerPort, y: arriveY }, { x: readerPort, y: reader.top });
+			} else {
+				ret.push({ x: railRight, y: turnY }, { x: portIn, y: turnY }, { x: portIn, y: parent.bottom });
+			}
 			routes.set(cell.key, { launch: tidy(launch), ret: tidy(ret) });
 		}
 	}

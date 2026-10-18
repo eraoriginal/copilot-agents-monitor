@@ -61,6 +61,17 @@ it. See [Hooks](#hooks) for what they add and their status.
 
   Lines run out on the left and back on the right, so none crosses a card or the other direction.
   Click a line to read its messages.
+
+  **A run that resumes a turn.** Subagents run in the background: the agent host holds the turn
+  until they finish, ends it, and starts the agent again at once to read their answers with
+  `read_agent`. That second run is not a new message from you. It is tagged `↻ resumes turn 1`,
+  keeps the turn's number, is not counted as a turn, and sits under the first run with no divider.
+  The lines back from the subagents it read run on down the right side into the top of its card,
+  where the answers were read; a subagent read inside the run that launched it still comes back
+  to that run. Spans do not say which subagent a `read_agent` call read (short of content capture
+  or hooks), so it counts as having read every subagent that had finished when the call ended.
+  A run counts as a resume when it starts within 5 seconds of the previous run's end, that run
+  launched subagents, and it calls `read_agent`; any other run of the agent is the next turn.
 - **Messages**, for the line you click. On a line out, what the launcher sent (the description,
   the full prompt, the agent type); on a line back, what came back once the agent was done. The
   agents a launcher started share the stretch out of its foot: a click there lists the message of

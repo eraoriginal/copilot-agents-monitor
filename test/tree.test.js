@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 import { createStore, deriveSession, ingest } from "../public/model.js";
-import { childrenOf, groupWaves, launchOf, waveStarts } from "../public/tree.js";
+import { childrenOf, groupWaves, launchOf, readerOf, turnTag, turnTitle, waveStarts } from "../public/tree.js";
 
 const T0 = 1_792_273_390_000;
 let n = 0;
@@ -111,4 +111,21 @@ test("waves group the agents that ran together, each keyed by its first agent", 
 		["e", ["e"]],
 	]);
 	assert.deepEqual(groupWaves([], 0), []);
+});
+
+test("a run started to read the subagents' answers is tagged as resuming its turn, not as a new one", () => {
+	assert.equal(turnTag({ turn: 1, resumeOf: null }), "turn 1");
+	assert.equal(turnTag({ turn: 1, resumeOf: "r1" }), "↻ resumes turn 1");
+	assert.equal(turnTag({ turn: 2, resumeOf: null }, true), "t2");
+	assert.equal(turnTag({ turn: 2, resumeOf: "r1" }, true), "↻t2");
+	assert.match(turnTitle({ turn: 1, resumeOf: "r1" }), /not a new message/);
+	assert.equal(turnTitle({ turn: 1, resumeOf: null }), "Turn 1 of the conversation");
+});
+
+test("an answer is read by the agent that launched it, or by the run started to read it", () => {
+	const agents = new Map([["r1", { key: "r1" }], ["r2", { key: "r2" }]]);
+	const view = { agents };
+	assert.equal(readerOf(view, { parentKey: "r1", returnKey: "r2" }), agents.get("r2"));
+	assert.equal(readerOf(view, { parentKey: "r1", returnKey: null }), agents.get("r1"));
+	assert.equal(readerOf(view, { parentKey: null, returnKey: null }), null);
 });

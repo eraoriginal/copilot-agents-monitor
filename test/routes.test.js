@@ -76,6 +76,31 @@ test("a return leaves the right edge of its card and ends on the parent's foot, 
 	}
 });
 
+test("a return read by a card below the block runs on down the right rail into that card's top", () => {
+	const { parent, kids, cells } = layout();
+	// The reader lies below the last row (it ends at 584), with room for the stem between.
+	const reader = box(200, 660, 380, 100);
+	const readers = new Map([["a", reader], ["f", reader]]);
+	const routes = routesFor({ parent, kids, cells, readers });
+	const railRight = kids.right - SPACING.rail;
+	for (const key of ["a", "f"]) {
+		const { ret } = routes.get(key);
+		assert.deepEqual(ret.at(-1), { x: reader.cx + SPACING.port, y: reader.top });
+		const [before, end] = ret.slice(-2);
+		assert.equal(before.x, end.x);
+		assert.ok(before.y < end.y, "the last segment goes down");
+		assert.ok(ret.some((point) => point.x === railRight && point.y === reader.top - SPACING.stem), "down the right rail");
+		for (const segment of segments(ret)) {
+			for (const card of [parent, reader, ...cells.map((cell) => cell.card)]) assert.equal(crosses(segment, card), false);
+		}
+	}
+	// A child without a reader below still comes back up into the parent's foot.
+	assert.deepEqual(routes.get("b").ret.at(-1), { x: parent.cx + SPACING.port, y: parent.bottom });
+	// A reader that does not lie below the bus is not reached by going down.
+	const level = routesFor({ parent, kids, cells, readers: new Map([["f", box(200, 500, 380, 100)]]) });
+	assert.deepEqual(level.get("f").ret.at(-1), { x: parent.cx + SPACING.port, y: parent.bottom });
+});
+
 test("no line passes through a card", () => {
 	const { parent, kids, cells } = layout();
 	const cards = [parent, ...cells.map((cell) => cell.card)];

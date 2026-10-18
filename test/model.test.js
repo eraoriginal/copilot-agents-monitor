@@ -167,6 +167,72 @@ test("a root agent that runs again is the next turn; parallel subagents of one n
 	assert.deepEqual(view.subagents.map((agent) => agent.label), ["scout #1", "scout #2", "scout #3"]);
 });
 
+const invoke = (name, parent, startS, endS, id) =>
+	span(`invoke_agent ${name}`, parent, startS, endS, { "gen_ai.operation.name": "invoke_agent", "gen_ai.agent.name": name }, id);
+
+/**
+ * What the agent host exports when subagents run in the background: the lead's first run launches
+ * two, ends as the last finishes (t=5), and a second run starts at once to read them.
+ */
+function backgroundRuns({ secondRun = [], gapS = 0.02 } = {}) {
+	const tasks = [tool("r1", "lead", "task", 1), tool("r1", "lead", "task", 1)];
+	return [
+		invoke("lead", null, 0, 5, "r1"),
+		chat("r1", 0, 1, { "github.copilot.initiator": "user" }),
+		...tasks,
+		invoke("finder", tasks[0].spanId, 1, 3, "finder"),
+		invoke("checker", tasks[1].spanId, 1, 4.9, "checker"),
+		invoke("lead", null, 5 + gapS, 9, "r2"),
+		chat("r2", 5 + gapS, 6, { "github.copilot.initiator": "agent" }),
+		...secondRun,
+	];
+}
+
+test("a run the host starts to read the subagents' answers continues the turn, and gets their returns", () => {
+	const view = sessionOf(
+		backgroundRuns({ secondRun: [tool("r2", "lead", "read_agent", 5.02), tool("r2", "lead", "read_agent", 5.03)] }),
+	);
+	const [first, second] = view.rootAgents;
+	assert.equal(second.resumeOf, first.key);
+	assert.deepEqual(view.rootAgents.map((agent) => agent.turn), [1, 1]);
+	assert.equal(view.turns, 1);
+	// They stay launched by the first run; their answers go to the one that read them.
+	for (const key of ["finder", "checker"]) {
+		assert.equal(view.agents.get(key).parentKey, "r1");
+		assert.equal(view.agents.get(key).returnKey, "r2");
+	}
+});
+
+test("a run that follows at once without reading is a new turn, and answers go back to the launcher", () => {
+	const view = sessionOf(backgroundRuns());
+	assert.equal(view.rootAgents[1].resumeOf, null);
+	assert.deepEqual(view.rootAgents.map((agent) => agent.turn), [1, 2]);
+	assert.equal(view.turns, 2);
+	assert.equal(view.agents.get("finder").returnKey, "r1");
+});
+
+test("a run that reads after a pause is a new turn: the host starts the next run at once", () => {
+	const view = sessionOf(backgroundRuns({ gapS: 30, secondRun: [tool("r2", "lead", "read_agent", 36)] }));
+	assert.equal(view.rootAgents[1].resumeOf, null);
+	assert.equal(view.turns, 2);
+	assert.equal(view.agents.get("checker").returnKey, "r1");
+});
+
+test("an answer read inside the launching run goes back to it, the other to the run that reads it", () => {
+	// The first run waits on finder (ends t=3) with a read that ends as it does; checker is read later.
+	const waiting = span(
+		"execute_tool read_agent",
+		"r1",
+		2.5,
+		3,
+		{ "gen_ai.operation.name": "execute_tool", "gen_ai.tool.name": "read_agent", "gen_ai.tool.call.id": "wait", "gen_ai.agent.name": "lead" },
+	);
+	const view = sessionOf(backgroundRuns({ secondRun: [waiting, tool("r2", "lead", "read_agent", 5.02)] }));
+	assert.equal(view.rootAgents[1].resumeOf, "r1");
+	assert.equal(view.agents.get("finder").returnKey, "r1");
+	assert.equal(view.agents.get("checker").returnKey, "r2");
+});
+
 test("a SubagentStart hook shows the subagent before its first span", () => {
 	const store = storeWith([chat("root", 0, 2, { "github.copilot.initiator": "user" })]);
 	ingest(store, {

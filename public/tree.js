@@ -38,6 +38,26 @@ export function groupWaves(kids, now) {
 	return waves;
 }
 
+/**
+ * What a root agent's tag says: its turn, or the turn it picks up again. A run the host started to
+ * read the answers of the subagents a run launched belongs to that run's turn: it is not a new one.
+ */
+export function turnTag(agent, short = false) {
+	if (agent.resumeOf) return short ? `↻t${agent.turn}` : `↻ resumes turn ${agent.turn}`;
+	return short ? `t${agent.turn}` : `turn ${agent.turn}`;
+}
+
+export function turnTitle(agent) {
+	return agent.resumeOf
+		? `Turn ${agent.turn} of the conversation, started again by the agent host to read what the subagents sent back: not a new message`
+		: `Turn ${agent.turn} of the conversation`;
+}
+
+/** The agent that reads `agent`'s answer: its launcher, or the later run of it that was started to read it. */
+export function readerOf(view, agent) {
+	return view.agents.get(agent.returnKey ?? agent.parentKey) ?? null;
+}
+
 /** Who launched `kid` and how far into its own run: `parent` is the agent that launched it. */
 export function launchOf(parent, kid) {
 	if (!parent || parent.virtual) return { launcher: null, offset: "" };

@@ -488,6 +488,14 @@ main {
 	border-top: 1px solid var(--line);
 }
 
+/* A run started to read the answers of the one above continues its turn: no divider, and room
+   for the returns that come down the right rail into its top. */
+.turn.resume {
+	margin-top: 40px;
+	padding-top: 0;
+	border-top: 0;
+}
+
 .node {
 	display: flex;
 	flex-direction: column;

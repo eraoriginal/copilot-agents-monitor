@@ -395,6 +395,31 @@ export function extractTodos(args) {
 
 const kindOf = (span) => span.attributes?.["gen_ai.operation.name"] ?? span.name.split(" ")[0];
 
+/**
+ * How soon after a run ends the agent host starts the next one to read the subagents it
+ * launched. They are background tasks: the host holds the turn until they finish, ends it, and
+ * starts another run of the same agent, in milliseconds. A user answering takes longer.
+ */
+const RESUME_GAP_MS = 5_000;
+const READ_TOOL = "read_agent";
+
+/**
+ * Whether `run` is the host starting the agent again to read what the subagents `previous`
+ * launched sent back, rather than a new message: it follows at once and calls `read_agent`.
+ */
+function resumes(previous, run) {
+	if (run.placeholder || previous.placeholder || !previous.done || previous.children.length === 0) return false;
+	return run.start - previous.end <= RESUME_GAP_MS && run.tools.some((tool) => tool.name === READ_TOOL);
+}
+
+/**
+ * Whether `run` read the answer of `subagent`: a `read_agent` call that ended no earlier than the
+ * subagent did. Spans do not say which agent a read was for, short of content capture or hooks.
+ */
+function readsAnswer(run, subagent) {
+	return run.tools.some((tool) => tool.name === READ_TOOL && (tool.end ?? tool.start) >= subagent.end - 100);
+}
+
 function newAgent(key, fields) {
 	return {
 		key,
@@ -409,6 +434,10 @@ function newAgent(key, fields) {
 		status: "running",
 		root: null,
 		parentKey: null,
+		// Who reads its answer: its launcher, or a later run of the launcher that was started to read it.
+		returnKey: null,
+		// A root run started by the host to read the subagents the previous run launched: that run's key.
+		resumeOf: null,
 		launchCallId: null,
 		// The `task` call that launched it, and the messages on its own span (content capture).
 		launchTool: null,
@@ -662,12 +691,35 @@ export function deriveSession(session, { now = Date.now(), pricing = null, mcpNa
 		const end = agent.done ? agent.end : now;
 		agent.durationMs = Number.isFinite(agent.start) ? Math.max(0, end - agent.start) : 0;
 	}
-	// A root agent that runs again is the next turn of the conversation, not another instance.
+	// A root agent that runs again is the next turn of the conversation, not another instance;
+	// unless the host started it to read the subagents the previous run launched: see `resumeOf`.
 	let turn = 0;
+	// The runs of the current turn: the first, then those the host started to read subagents.
+	let chain = [];
+	const runsOf = new Map();
 	for (const agent of [...all].filter((a) => a.root).sort((x, y) => x.start - y.start)) {
-		turn += 1;
-		agent.turn = turn;
+		const previous = chain.at(-1);
+		if (previous && resumes(previous, agent)) {
+			agent.resumeOf = previous.key;
+			agent.turn = previous.turn;
+		} else {
+			turn += 1;
+			agent.turn = turn;
+			chain = [];
+		}
+		runsOf.set(agent, chain);
+		chain.push(agent);
 		agent.label = agent.name;
+	}
+	// Where a subagent's answer goes: to the run that reads it, which may be a later run of the
+	// same turn. Without a read, or with the agent still working, it goes back to its launcher.
+	for (const agent of all) {
+		agent.returnKey = agent.parentKey;
+		const launcher = agent.parentKey ? agents.get(agent.parentKey) : null;
+		const runs = launcher ? runsOf.get(launcher) : null;
+		if (!runs || !agent.done) continue;
+		const reader = runs.slice(runs.indexOf(launcher)).find((run) => readsAnswer(run, agent));
+		if (reader) agent.returnKey = reader.key;
 	}
 	const subCounts = new Map();
 	for (const agent of all) {
@@ -695,6 +747,7 @@ export function deriveSession(session, { now = Date.now(), pricing = null, mcpNa
 			status: hook.end ? "done" : "running",
 			root: false,
 			parentKey: root?.key ?? null,
+			returnKey: root?.key ?? null,
 			durationMs: (hook.end ?? now) - hook.start,
 			instance: 1,
 		});
@@ -778,7 +831,7 @@ export function deriveSession(session, { now = Date.now(), pricing = null, mcpNa
 		toolCount,
 		mcp,
 		mcpAvailable: [...mcpAvailable.values()],
-		turns: rootAgents.length,
+		turns: rootAgents.filter((agent) => !agent.resumeOf).length,
 		todos,
 		log,
 	};

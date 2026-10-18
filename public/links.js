@@ -8,6 +8,8 @@
  *   run      the same route in dashes that advance toward the child, while the child works.
  *   return   child → parent: dashes out of the child's card, an arrowhead in the parent's foot;
  *            faint until the child is done, green after, advancing for a few seconds at the end.
+ *            When a later run of the parent was started to read the answer, the line runs on down
+ *            to the top of that run's card instead.
  *
  * A second SVG, over the cards, holds a wide invisible stroke along each launch and return: what
  * the pointer and the keyboard reach. It stops short of the cards, so a card stays clickable.
@@ -153,19 +155,24 @@ export function createLinkLayer(flow) {
 			routes = new Map();
 			const live = new Set();
 			const now = performance.now();
+			const cardsByKey = new Map([...flow.querySelectorAll(".card")].map((card) => [card.dataset.key, card]));
 			for (const node of flow.querySelectorAll(".node")) {
 				const parentCard = node.querySelector(":scope > .slot > .card");
 				const kids = node.querySelector(":scope > .kids");
 				if (!parentCard || !kids || kids.hidden) continue;
 				const cards = new Map();
 				const cells = [];
+				// A child whose answer is read by a later run of the parent: that run's card, below.
+				const readers = new Map();
 				for (const cell of kids.querySelectorAll(":scope > .wave > .cell")) {
 					const card = cell.querySelector(":scope > .node > .slot > .card");
 					if (!card) continue;
 					cards.set(card.dataset.key, card);
 					cells.push({ key: card.dataset.key, ...boxOf(flow, cell), card: boxOf(flow, card) });
+					const reader = card.dataset.returnTo ? cardsByKey.get(card.dataset.returnTo) : null;
+					if (reader) readers.set(card.dataset.key, boxOf(flow, reader));
 				}
-				for (const [key, route] of routesFor({ parent: boxOf(flow, parentCard), kids: boxOf(flow, kids), cells })) {
+				for (const [key, route] of routesFor({ parent: boxOf(flow, parentCard), kids: boxOf(flow, kids), cells, readers })) {
 					routes.set(key, route);
 					const card = cards.get(key);
 					const status = statusOf(card);
