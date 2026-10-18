@@ -31,8 +31,11 @@ The monitor listens on `localhost:4318`, the endpoint Copilot exports to by defa
 endpoint needs setting. It listens on both `127.0.0.1` and `::1`, because `localhost` resolves to
 IPv6 first on Windows.
 
-Optional: `npm run install-hooks` shows a hook file for `~/.copilot/hooks/`, and `-- --yes` writes
-it. See [Hooks](#hooks) for what they add and their status.
+Optional: without more, the page shows what each agent did but not what it was asked or what it
+read. The note *Arguments and results show here with hooks, or with
+chat.agentHost.otel.captureContent: true* says so. [What spans leave
+out](#what-spans-leave-out) lists what is missing and how to turn it on: content capture
+(`"chat.agentHost.otel.captureContent": true`) or `npm run install-hooks`.
 
 ## What the page shows
 
@@ -179,6 +182,42 @@ calls of that round: by the size of their results when each is known, evenly oth
 first call reads them fresh, later ones from the cache, each priced at the rate that call was
 billed per weighted token. The tools' schemas, sent with every call, are not counted.
 
+### What spans leave out
+
+By default Copilot exports how a run went, not what was said in it. Without more, the page has
+the agents and their hierarchy, models, durations, tokens and costs, the name, duration and
+status of every tool call, permissions, exit codes and errors. It lacks:
+
+- **What each tool call did**: the file `view` opened, the command `powershell` ran, a call's
+  arguments and result. The tool calls panel lists `view ×13`, not which files, and shows the
+  note *Arguments and results show here…* at its foot.
+- **Messages between agents**: the prompt a subagent was sent and the answer it sent back. A line
+  you click says the message was not reported.
+- **Briefs**: a subagent's card shows its last tool instead of the task it was given.
+- **The todo list** in the Progress panel, which falls back to subagents done.
+- **MCP server names**, which stay hashed: a server the monitor cannot work out from the
+  settings it reads shows as `server 4c96a3d`. Only content capture gives them in clear.
+
+Two ways to get the rest, alone or together:
+
+1. **Content capture**, in your VS Code **user** settings:
+
+   ```jsonc
+   "chat.agentHost.otel.captureContent": true
+   ```
+
+   Then quit VS Code completely and reopen it, as for the settings above. This is the agent
+   host's setting; no equivalent for the chat extension's harness was checked.
+2. **Hooks**: `npm run install-hooks` shows the hook file, and `npm run install-hooks -- --yes`
+   writes `~/.copilot/hooks/agent-monitor.json`, which applies to every workspace you open. See
+   [Hooks](#hooks) below, including that they did not run on Copilot Free.
+
+Both write what they capture to `~/.agent-monitor`: prompts, file contents, commands and tool
+results, kept for 14 days. It stays on the machine, but on a project that reads tickets or
+private code, turn it on knowingly. They are settings of the machine VS Code runs on, and an
+organization's managed settings override yours (see [Known limits](#known-limits)); if nothing
+changes after you turn them on, that may be why.
+
 ### Hooks
 
 Hooks add what spans leave out: the moment a subagent starts, and tool arguments (the brief a
@@ -202,7 +241,8 @@ relying on them.
   host, the call that launched a subagent, and so its prompt and answer, arrives with the root
   agent's spans, when its turn ends. Content
   capture puts prompts, file contents and tool arguments into the spans, and so into
-  `~/.agent-monitor`. It stays local, but turn it on knowingly.
+  `~/.agent-monitor`. It stays local, but turn it on knowingly. See
+  [What spans leave out](#what-spans-leave-out).
 - **Managed settings win.** An organization can set Copilot's OTel settings by policy; personal
   settings are then ignored.
 
