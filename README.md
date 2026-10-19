@@ -225,6 +225,12 @@ subagent receives, the todo list) without turning on content capture. The hook s
 each event to a file and exits 0 without writing to stdout: it never blocks a call and never takes
 a permission decision another hook should take.
 
+Each entry gives the command once per shell: `command` and `bash` as is, and `powershell` behind
+the call operator `&`. On Windows the agent host runs hooks through PowerShell, which reads a line
+starting with a quoted path as a string: without `&`, the hook fails to parse and exits 1, and a
+failing `PreToolUse` denies **every** tool call with `hook errored`. If an agent reports that, run
+`npm run install-hooks -- --remove`, then reinstall with the current version.
+
 Measured on 2026-10-17, VS Code 1.142, Copilot Free, agent host: **workspace hooks did not run at
 all**, whatever the command. The monitor works on spans alone; check hooks on a paid plan before
 relying on them.
