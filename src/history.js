@@ -85,7 +85,7 @@ export function createHistory({ dataDir, workspaces, pricing }) {
 			if (!force && now - (touchedAt.get(session.id) ?? 0) < QUIET_MS) continue;
 			const view = deriveSession(session, { now, pricing });
 			summarizedVersion.set(session.id, session.version);
-			if (view.agents.size === 0) continue;
+			if (view.agents.size === 0 || view.background) continue;
 			const place = placeOf(view, workspaces.list());
 			const firstRecorded = place.workspace?.branchHistory?.[0]?.since;
 			// Before the monitor first saw the workspace, its branch then is a guess.
@@ -107,9 +107,7 @@ export function createHistory({ dataDir, workspaces, pricing }) {
 
 	return {
 		ingest(envelope) {
-			ingest(store, envelope);
-			const data = envelope.data ?? {};
-			const id = data.attributes?.["gen_ai.conversation.id"] ?? data.traceId ?? data.session_id;
+			const id = ingest(store, envelope);
 			if (id) touchedAt.set(id, Date.now());
 		},
 		/** Summarizes what was loaded at start, before any event arrives. */

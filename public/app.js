@@ -1699,8 +1699,21 @@ function setView(view) {
 function currentViews(now) {
 	return [...store.sessions.values()]
 		.map((session) => summaryOf(session, now))
-		.filter((view) => view.agents.size > 0 || view.log.length > 0)
+		.filter((view) => !view.background && (view.agents.size > 0 || view.log.length > 0))
 		.sort((x, y) => y.lastActivityAt - x.lastActivityAt);
+}
+
+// How long a session that has not handed the turn back keeps the page without a sign of activity.
+const AT_WORK_MS = 120_000;
+
+/**
+ * The session to follow: the one shown, as long as it is at work; once it is done, the latest.
+ * Another session's activity does not take the page from a session still running.
+ */
+function sessionToFollow(views, now) {
+	const current = views.find((view) => view.id === ui.sessionId);
+	const atWork = current && (current.live || (!current.waitingForUser && now - current.lastActivityAt < AT_WORK_MS));
+	return atWork ? current.id : (views[0]?.id ?? null);
 }
 
 /** While the history shows, the top bar and the status line still follow the latest session. */
@@ -1721,7 +1734,7 @@ function render() {
 	}
 	const views = currentViews(now);
 	if (ui.follow || !views.some((view) => view.id === ui.sessionId)) {
-		ui.sessionId = views[0]?.id ?? null;
+		ui.sessionId = sessionToFollow(views, now);
 	}
 	renderSessionPicker(views);
 	const view = views.find((candidate) => candidate.id === ui.sessionId) ?? null;

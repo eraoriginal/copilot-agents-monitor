@@ -7,6 +7,7 @@ import {
 	extractTodos,
 	handoffOf,
 	ingest,
+	listSessions,
 	mcpLabel,
 	mcpOf,
 	messageText,
@@ -484,4 +485,44 @@ test("results known for every call of a round share its tokens by their size", (
 	assert.equal(search.cost.tokens, 600);
 	assert.equal(read.cost.tokens, 200);
 	assert.equal(search.cost.shared, false);
+});
+
+test("a subagent's hook events go to the session that launched it, by their trace", () => {
+	const store = createStore();
+	const hook = (sessionId, name, trace, timeS, extra = {}) =>
+		ingest(store, {
+			kind: "hook",
+			time: T0 + timeS * 1000,
+			data: { hook_event_name: name, session_id: sessionId, traceparent: `00-${trace}-ab12cd34ef567890-01`, ...extra },
+		});
+	assert.equal(hook(CONVERSATION, "UserPromptSubmit", "t1", 0, { prompt: "go" }), CONVERSATION);
+	// VS Code gives the subagent a session ID of its own, in the same trace.
+	assert.equal(hook("subagent-session", "UserPromptSubmit", "t1", 2, { prompt: "brief" }), CONVERSATION);
+	assert.equal(hook("subagent-session", "PreToolUse", "t1", 3, { tool_name: "read_file" }), CONVERSATION);
+	ingest(store, { kind: "span", time: T0 + 4000, data: chat("sub", 2, 4, { "github.copilot.initiator": "sub-agent" }) });
+	assert.deepEqual([...store.sessions.keys()], [CONVERSATION]);
+	const view = deriveSession(store.sessions.get(CONVERSATION), { now: T0 + 5000 });
+	assert.equal(view.prompt, "go");
+	assert.equal(store.sessions.get(CONVERSATION).hooks.length, 3);
+	// Another conversation keeps its own session, whatever trace it comes in.
+	assert.equal(hook("other", "UserPromptSubmit", "t2", 6), "other");
+});
+
+test("LLM calls VS Code makes outside any conversation are background, not a session", () => {
+	const store = createStore();
+	const lone = {
+		traceId: "lone",
+		spanId: "x1",
+		parentSpanId: null,
+		name: "chat gpt-4o-mini",
+		start: T0,
+		end: T0 + 500,
+		attributes: { "gen_ai.operation.name": "chat", "gen_ai.agent.name": "copilotLanguageModelWrapper" },
+		status: { code: 0 },
+	};
+	ingest(store, { kind: "span", time: lone.end, data: lone });
+	ingest(store, { kind: "span", time: T0 + 2000, data: chat("root", 0, 2, { "github.copilot.initiator": "user" }) });
+	assert.equal(deriveSession(store.sessions.get("lone")).background, true);
+	assert.equal(deriveSession(store.sessions.get(CONVERSATION)).background, false);
+	assert.deepEqual(listSessions(store).map((view) => view.id), [CONVERSATION]);
 });

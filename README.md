@@ -107,7 +107,9 @@ out](#what-spans-leave-out) lists what is missing and how to turn it on: content
 - **Session log**: every call as it arrives.
 
 Sessions from the last two days are listed; the page follows the latest one unless you pick
-another.
+another. A session still at work keeps the page: another session's activity does not take it
+until it is done. A subagent's hook events go to the session that launched it, and the LLM calls
+VS Code makes on its own (titles, embeddings…) are not listed as sessions.
 
 The live view moves with the run: a packet travels along the outgoing line to an agent when it is
 launched and along its return line when it finishes; a running card glows and sweeps, a finished

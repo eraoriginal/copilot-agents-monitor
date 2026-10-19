@@ -19,7 +19,14 @@ const STALLED_AFTER_MS = 120_000;
 const SUBAGENT_TOOLS = new Set(["task", "runSubagent", "agent", "run_subagent"]);
 
 export function createStore() {
-	return { sessions: new Map(), lastEventAt: 0, spansSeen: 0, hooksSeen: 0, lastLagMs: null };
+	// `traces`: the session each trace belongs to, by trace ID.
+	return { sessions: new Map(), traces: new Map(), lastEventAt: 0, spansSeen: 0, hooksSeen: 0, lastLagMs: null };
+}
+
+/** The trace ID of a W3C `traceparent`, `00-<trace>-<span>-<flags>`, or null. */
+function traceOf(traceparent) {
+	const parts = typeof traceparent === "string" ? traceparent.split("-") : [];
+	return parts.length >= 3 && parts[1] ? parts[1] : null;
 }
 
 function sessionFor(store, id, time) {
@@ -37,22 +44,41 @@ function sessionFor(store, id, time) {
 	return session;
 }
 
+/**
+ * Indexes one event under its session, and returns that session's ID (undefined when ignored).
+ *
+ * VS Code gives each subagent hook events of its own `session_id`, while its spans carry the
+ * conversation ID of the session that launched it. Every event carries the trace of the turn,
+ * though: a hook goes to the session that trace belongs to, so a subagent never shows as a
+ * session of its own.
+ */
 export function ingest(store, envelope) {
 	const time = envelope.time ?? Date.now();
 	store.lastEventAt = Math.max(store.lastEventAt, time);
 	if (envelope.kind === "span") {
 		const span = envelope.data;
-		if (!span?.spanId || span.name?.startsWith("session.")) return;
-		const id = span.attributes?.["gen_ai.conversation.id"] ?? span.traceId;
+		if (!span?.spanId || span.name?.startsWith("session.")) return undefined;
+		const conversation = span.attributes?.["gen_ai.conversation.id"];
+		if (conversation && span.traceId && !store.traces.has(span.traceId)) store.traces.set(span.traceId, conversation);
+		const id = conversation ?? store.traces.get(span.traceId) ?? span.traceId;
 		sessionFor(store, id, span.end ?? span.start ?? time).spans.set(span.spanId, span);
 		store.spansSeen += 1;
 		if (span.receivedAt && span.end) store.lastLagMs = span.receivedAt - span.end;
-	} else if (envelope.kind === "hook") {
+		return id;
+	}
+	if (envelope.kind === "hook") {
 		const event = envelope.data ?? {};
-		const id = event.session_id ?? event.sessionId ?? "hooks";
+		let id = event.session_id ?? event.sessionId ?? "hooks";
+		const trace = traceOf(event.traceparent);
+		const owner = trace ? store.traces.get(trace) : null;
+		// A session with spans of its own is a conversation: its hooks stay with it.
+		if (owner && owner !== id && !store.sessions.get(id)?.spans.size) id = owner;
+		else if (trace && !owner) store.traces.set(trace, id);
 		sessionFor(store, id, time).hooks.push({ ...event, time });
 		store.hooksSeen += 1;
+		return id;
 	}
+	return undefined;
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -810,8 +836,17 @@ export function deriveSession(session, { now = Date.now(), pricing = null, mcpNa
 	}
 
 	const lastActivityAt = Math.max(session.lastAt, ...all.map((agent) => agent.lastActivity));
+	// LLM calls and embeddings VS Code makes on its own (titles, intents…): no conversation, no
+	// agent, no tool, no hook. Not a session anyone started.
+	const background =
+		session.hooks.length === 0 &&
+		spans.every(
+			(span) =>
+				!span.attributes?.["gen_ai.conversation.id"] && !["invoke_agent", "execute_tool"].includes(kindOf(span)),
+		);
 	return {
 		id: session.id,
+		background,
 		title: rootAgents[0]?.name ?? subagents[0]?.name ?? "session",
 		prompt,
 		cwd,
@@ -837,9 +872,10 @@ export function deriveSession(session, { now = Date.now(), pricing = null, mcpNa
 	};
 }
 
-/** The sessions, most recent first, each with what the session list shows. */
+/** The sessions, most recent first, each with what the session list shows: background calls left out. */
 export function listSessions(store, options) {
 	return [...store.sessions.values()]
 		.map((session) => deriveSession(session, options))
+		.filter((view) => !view.background)
 		.sort((x, y) => y.lastActivityAt - x.lastActivityAt);
 }
