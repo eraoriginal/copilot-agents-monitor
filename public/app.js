@@ -7,6 +7,7 @@ import {
 	formatUsd,
 	shortModel,
 } from "./format.js";
+import { TARGETS, sessionIndicators } from "./indicators.js";
 import { createStore, deriveSession, handoffOf, ingest, mcpLabel } from "./model.js";
 import { countTo, flash, motionAllowed, reconcile, sendPacket, typeInto } from "./motion.js";
 import { createLinkLayer } from "./links.js";
@@ -38,6 +39,8 @@ const ui = {
 	renderQueued: false,
 	lastRenderAt: 0,
 	sessionsSignature: "",
+	// The hooks' time of each session, from Copilot's journal, as the server last read it.
+	journal: new Map(),
 };
 const summaries = new Map();
 const $ = (id) => document.getElementById(id);
@@ -826,7 +829,7 @@ function renderTools(view) {
 			? "No tool call reported yet."
 			: tools.some((tool) => tool.args != null || tool.result != null)
 				? ""
-				: "Arguments and results show here with hooks, or with chat.agentHost.otel.captureContent: true.";
+				: "Arguments and results show here with chat.agentHost.otel.captureContent: true.";
 	$("tools-note").textContent = note;
 	$("tools-note").hidden = !note;
 }
@@ -835,7 +838,7 @@ function renderTools(view) {
 // The messages a line carries: what a parent sent the agents it reaches, or what they sent back.
 // A stretch that several agents' lines share carries all their messages.
 
-const CAPTURE_HINT = "It shows with hooks, or with chat.agentHost.otel.captureContent: true.";
+const CAPTURE_HINT = "It shows with chat.agentHost.otel.captureContent: true, or with the hooks' tool events.";
 
 function agentButton(agent) {
 	return el("button", { type: "button", class: "link", title: `Show ${agent.label}'s tool calls`, onclick: () => selectAgent(agent.key) }, agent.label);
@@ -1150,6 +1153,86 @@ function renderCosts(view) {
 		(row) => row.credits,
 		(row) => `${formatCredits(row.credits)} · ${row.calls}×`,
 		(row) => `${row.model}\n${row.calls} calls · ${formatCredits(row.credits)} ≈ ${formatUsd(row.usd)}\ncache ${formatPercent(row.cacheRead, row.input)} of ${formatTokens(row.input)} input`,
+	);
+}
+
+// ---------------------------------------------------------------------------------------------
+// Indicators: each against its target (public/indicators.js).
+
+const JOURNAL_REFRESH_MS = 15_000;
+
+/** The hooks' time of a session: asked of the server once, then every 15 s while it runs. */
+function journalOf(view, now) {
+	const entry = ui.journal.get(view.id);
+	const stale = !entry || (view.live && now - entry.at > JOURNAL_REFRESH_MS);
+	if (stale && !entry?.pending) {
+		ui.journal.set(view.id, { at: now, hooks: entry?.hooks ?? null, pending: true });
+		getJson(`/api/journal?session=${encodeURIComponent(view.id)}`)
+			.then((body) => ui.journal.set(view.id, { at: Date.now(), hooks: body?.hooks ?? null, pending: false }))
+			.catch(() => ui.journal.set(view.id, { at: Date.now(), hooks: entry?.hooks ?? null, pending: false }))
+			.finally(() => scheduleRender());
+	}
+	return entry?.hooks ?? null;
+}
+
+const mark = (over, measured = true) => (!measured ? "" : over ? " over" : " ok");
+
+function indicatorRow(label, value, target, className, tip) {
+	return [
+		el("span", { class: "indicator-label" }, label),
+		el(
+			"span",
+			{ class: "indicator-cell" },
+			el("span", { class: `indicator-value${className}`, tip }, value),
+			el("span", { class: "indicator-target" }, target),
+		),
+	];
+}
+
+function renderIndicators(view, now) {
+	if (!view || view.agents.size === 0) {
+		emptyNote("indicators");
+		return;
+	}
+	const hooks = journalOf(view, now);
+	const k = sessionIndicators(view, hooks);
+	const wake = k.wakeUps;
+	replace(
+		"indicators",
+		el(
+			"div",
+			{ class: "indicators" },
+			indicatorRow(
+				"cost",
+				`${formatCredits(k.credits)} ≈ ${formatUsd(view.totals.usd)}`,
+				"per ticket",
+				"",
+				"What the session cost. Compare it ticket by ticket in the history.",
+			),
+			indicatorRow(
+				"wake-ups",
+				wake.count === 0 ? "none" : `${wake.count} × ${formatTokens(Math.round(wake.average))} · ${formatCredits(wake.credits)}`,
+				`< ${formatTokens(TARGETS.wakeUpTokens)} each`,
+				mark(wake.over, wake.count > 0),
+				"Calls of the root agent that found its cache cold and wrote its whole context again: it had waited more than 5 minutes for its subagents or for you. /compact before a long wait makes each one smaller.",
+			),
+			indicatorRow(
+				"largest context",
+				k.context.max ? `${formatTokens(k.context.max)} · ${k.context.agent}` : "—",
+				`< ${formatTokens(TARGETS.contextTokens)}`,
+				mark(k.context.over, k.context.max > 0),
+				k.context.runs.map((run) => `${run.label}: ${formatTokens(run.max)}`).join("\n") || "No LLM call yet.",
+			),
+			indicatorRow(
+				"hooks",
+				k.hooks ? `${Math.round(k.hooks.share * 100)}% · ${formatDuration(k.hooks.hookMs)}` : "—",
+				`< ${Math.round(TARGETS.hookShare * 100)}% of agent time`,
+				mark(k.hooks?.over, Boolean(k.hooks)),
+				k.hooks
+					? `Hooks took ${formatDuration(k.hooks.hookMs)} of the agents' ${formatDuration(k.hooks.workMs)} of work: each one is a process the agent waits for.`
+					: "Read from Copilot's journal of the session (~/.copilot/session-state), which is not on this machine.",
+			),
+		),
 	);
 }
 
@@ -1641,9 +1724,27 @@ function renderTicketsAndSessions() {
 	replace(
 		"history-sessions",
 		table(
-			[["started"], ["ticket"], ["workspace"], ["root agent"], ["agents", true], ["wall clock", true], ["tokens in", true], ["cost", true], [""]],
+			[
+				["started"],
+				["ticket"],
+				["workspace"],
+				["root agent"],
+				["agents", true],
+				["wall clock", true],
+				["tokens in", true],
+				["cost", true],
+				["wake-ups", true],
+				["max context", true],
+				["hooks", true],
+				[""],
+			],
 			listed.map((summary) => {
 				const loaded = store.sessions.has(summary.id);
+				// Summaries written before the indicators existed have none.
+				const k = summary.indicators;
+				const wake = k?.wakeUps;
+				const hooks = k?.hooks;
+				const rated = (over, measured = true) => (measured ? (over ? "num over" : "num ok") : "num");
 				return el(
 					"tr",
 					{},
@@ -1655,6 +1756,27 @@ function renderTicketsAndSessions() {
 					el("td", { class: "num" }, formatDuration(summary.wallMs)),
 					el("td", { class: "num" }, formatTokens(summary.totals.input)),
 					el("td", { class: "num", title: `≈ ${formatUsd(summary.totals.usd)}` }, `${formatCredits(summary.totals.credits)}${summary.totals.estimated ? " est." : ""}`),
+					el(
+						"td",
+						{
+							class: rated(wake?.average > TARGETS.wakeUpTokens, wake?.count > 0),
+							title: wake?.count ? `${formatCredits(wake.credits)} on calls that rewrote a cold cache` : null,
+						},
+						!wake ? "—" : wake.count === 0 ? "0" : `${wake.count} × ${formatTokens(wake.average)}`,
+					),
+					el(
+						"td",
+						{ class: rated(k?.context.max > TARGETS.contextTokens, Boolean(k?.context.max)), title: k?.context.agent ?? null },
+						k?.context.max ? formatTokens(k.context.max) : "—",
+					),
+					el(
+						"td",
+						{
+							class: rated(hooks?.share > TARGETS.hookShare, Boolean(hooks)),
+							title: hooks ? `${formatDuration(hooks.hookMs)} of ${formatDuration(hooks.workMs)} of agent work` : null,
+						},
+						hooks ? `${Math.round(hooks.share * 100)}%` : "—",
+					),
 					el(
 						"td",
 						{},
@@ -1752,6 +1874,7 @@ function render() {
 	renderTools(view);
 	renderMessage(view);
 	if (ui.reveal) revealPanel();
+	renderIndicators(view, now);
 	renderProgress(view);
 	renderRouting(view);
 	renderCosts(view);

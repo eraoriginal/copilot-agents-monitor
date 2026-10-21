@@ -1,12 +1,19 @@
 #!/usr/bin/env node
 /**
  * Installs the monitor's hook for every workspace: `~/.copilot/hooks/agent-monitor.json`, which
- * VS Code reads in both harnesses. Hooks bring what spans cannot: the moment an agent starts,
- * and tool arguments (briefs, todo lists) without turning on OTel content capture.
+ * VS Code reads in both harnesses. Hooks bring what spans cannot: the moment an agent starts, and
+ * the user's prompt.
  *
- *   npm run install-hooks              shows the file and where it would go; changes nothing
- *   npm run install-hooks -- --yes     writes it
- *   npm run install-hooks -- --remove  deletes it, if it is the one this command wrote
+ * By default the hook takes only the events that happen a few times per turn. Tool calls are left
+ * out: the host starts a process for each hook it runs, before and after every tool call, which
+ * cost 1 to 2 seconds per call on Windows. Spans with content capture
+ * (`chat.agentHost.otel.captureContent`) carry the same arguments and results at no such cost.
+ * `--tools` adds PreToolUse and PostToolUse back, for a machine where content capture is off.
+ *
+ *   npm run install-hooks                    shows the file and where it would go; changes nothing
+ *   npm run install-hooks -- --yes           writes it
+ *   npm run install-hooks -- --yes --tools   writes it with the tool-call events
+ *   npm run install-hooks -- --remove        deletes it, if it is the one this command wrote
  */
 
 import { existsSync, mkdirSync, readFileSync, unlinkSync, writeFileSync } from "node:fs";
@@ -16,20 +23,19 @@ import { fileURLToPath } from "node:url";
 import { parseArgs } from "node:util";
 
 const MARKER = "agent-monitor";
-const EVENTS = [
-	"SessionStart",
-	"UserPromptSubmit",
-	"PreToolUse",
-	"PostToolUse",
-	"PreCompact",
-	"SubagentStart",
-	"SubagentStop",
-	"Stop",
-];
+/** A few per turn: their cost is negligible. */
+const EVENTS = ["SessionStart", "UserPromptSubmit", "PreCompact", "SubagentStart", "SubagentStop", "Stop"];
+/** One process before and one after every tool call: only with `--tools`. */
+const TOOL_EVENTS = ["PreToolUse", "PostToolUse"];
 
 const { values: args } = parseArgs({
-	options: { yes: { type: "boolean", default: false }, remove: { type: "boolean", default: false } },
+	options: {
+		yes: { type: "boolean", default: false },
+		remove: { type: "boolean", default: false },
+		tools: { type: "boolean", default: false },
+	},
 });
+const events = args.tools ? [...EVENTS, ...TOOL_EVENTS] : EVENTS;
 
 const target = join(homedir(), ".copilot", "hooks", `${MARKER}.json`);
 const hookScript = fileURLToPath(new URL("./hook.js", import.meta.url));
@@ -48,7 +54,7 @@ const entry = {
 const config = {
 	version: 1,
 	$comment: `Written by ${MARKER} (npm run install-hooks). Appends each event to ~/.agent-monitor; never blocks, never decides.`,
-	hooks: Object.fromEntries(EVENTS.map((event) => [event, [entry]])),
+	hooks: Object.fromEntries(events.map((event) => [event, [entry]])),
 };
 
 if (args.remove) {

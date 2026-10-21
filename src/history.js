@@ -9,6 +9,7 @@
 
 import { existsSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
+import { sessionIndicators } from "../public/indicators.js";
 import { createStore, deriveSession, ingest } from "../public/model.js";
 import { counterfactual } from "../public/routing.js";
 import { placeOf } from "../public/workspaces.js";
@@ -16,7 +17,8 @@ import { appendRecord, parseLines } from "./store.js";
 
 const QUIET_MS = 30_000;
 
-export function summarize(view, place, pricing) {
+/** `hooks`: the hooks' share of the agents' time, from Copilot's journal, or null. */
+export function summarize(view, place, pricing, hooks = null) {
 	const byAgent = {};
 	for (const agent of view.agents.values()) {
 		if (agent.placeholder) continue;
@@ -31,6 +33,7 @@ export function summarize(view, place, pricing) {
 	const byModel = {};
 	for (const [model, totals] of view.byModel) byModel[model] = { calls: totals.calls, credits: totals.credits };
 	const alternative = counterfactual(view, pricing);
+	const indicators = sessionIndicators(view, hooks);
 	return {
 		id: view.id,
 		title: view.title,
@@ -60,10 +63,20 @@ export function summarize(view, place, pricing) {
 		baseline: alternative ? { model: alternative.baseline, credits: alternative.alternative } : null,
 		byAgent,
 		byModel,
+		indicators: {
+			wakeUps: {
+				count: indicators.wakeUps.count,
+				average: Math.round(indicators.wakeUps.average),
+				credits: indicators.wakeUps.credits,
+			},
+			context: { max: indicators.context.max, agent: indicators.context.agent },
+			hooks: hooks ? { share: hooks.share, hookMs: hooks.hookMs, workMs: hooks.workMs } : null,
+		},
 	};
 }
 
-export function createHistory({ dataDir, workspaces, pricing }) {
+/** `journal`: reads the hooks' time from Copilot's journal (`src/copilotJournal.js`); optional. */
+export function createHistory({ dataDir, workspaces, pricing, journal = null }) {
 	const file = join(dataDir, "sessions.jsonl");
 	const summaries = new Map();
 	if (existsSync(file)) {
@@ -90,7 +103,7 @@ export function createHistory({ dataDir, workspaces, pricing }) {
 			const firstRecorded = place.workspace?.branchHistory?.[0]?.since;
 			// Before the monitor first saw the workspace, its branch then is a guess.
 			place.branchGuessed = Boolean(place.branch && firstRecorded && firstRecorded > view.startedAt);
-			const summary = summarize(view, place, pricing);
+			const summary = summarize(view, place, pricing, journal?.hooksOf(view.id) ?? null);
 			const previous = summaries.get(summary.id);
 			if (previous?.branch) {
 				// A session keeps the place it was first summarized with: the branch may have moved since.

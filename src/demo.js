@@ -5,7 +5,7 @@
  *
  * Each span is published a second or two after it ends, as the OTLP batch exporter would. The
  * todo list, the prompts the conductor sends and the answers it gets back carry tool arguments
- * and results, which a real run reports only with hooks or content capture on.
+ * and results, which a real run reports only with content capture on, or the hooks' tool events.
  */
 
 import { createHash, randomBytes, randomUUID } from "node:crypto";

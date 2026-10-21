@@ -1245,6 +1245,49 @@ button.link {
 	font-size: 12px;
 }
 
+/* Indicators ----------------------------------------------------------------------------------- */
+
+.indicators {
+	display: grid;
+	grid-template-columns: auto 1fr;
+	align-items: baseline;
+	gap: 9px 12px;
+}
+
+.indicator-label {
+	color: var(--ink-2);
+	white-space: nowrap;
+}
+
+/* The value on top, its target below it: the side column is narrow. */
+.indicator-cell {
+	display: flex;
+	flex-direction: column;
+	align-items: flex-end;
+	min-width: 0;
+	text-align: right;
+}
+
+.indicator-value {
+	font-variant-numeric: tabular-nums;
+	overflow-wrap: anywhere;
+}
+
+.indicator-target {
+	color: var(--muted);
+	font-size: 11px;
+}
+
+.indicator-value.ok,
+td.ok {
+	color: var(--good);
+}
+
+.indicator-value.over,
+td.over {
+	color: var(--critical);
+}
+
 /* Timeline ------------------------------------------------------------------------------------- */
 
 .legend {

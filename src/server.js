@@ -26,6 +26,7 @@ import { fileURLToPath } from "node:url";
 import { parseArgs } from "node:util";
 import { gunzipSync, inflateSync } from "node:zlib";
 import { DEFAULTS, dataDir } from "./config.js";
+import { createJournalReader } from "./copilotJournal.js";
 import { createHistory } from "./history.js";
 import { createMcpNames } from "./mcp.js";
 import { flattenLogs, flattenTraces } from "./otlp.js";
@@ -84,6 +85,8 @@ let workspaces = null;
 let history = null;
 // The names of the MCP servers, by the SHA-256 Copilot reports them as.
 let mcpNames = null;
+// Copilot's own journal of each session, for the hooks' time; none in the demo.
+let journal = null;
 
 /** `live`: an event as it arrives, which the history also takes; not one reloaded at start. */
 function publish(envelope, { live = true } = {}) {
@@ -279,6 +282,11 @@ function handleUi(request, response) {
 	if (pathname === "/api/workspaces") return sendJson(response, 200, workspaces?.list() ?? []);
 	if (pathname === "/api/history") return sendJson(response, 200, history?.list() ?? []);
 	if (pathname === "/api/mcp") return sendJson(response, 200, mcpNames?.table() ?? {});
+	if (pathname === "/api/journal") {
+		// The session ID is checked against Copilot's format before it names a file.
+		const session = new URL(request.url, "http://localhost").searchParams.get("session");
+		return sendJson(response, 200, { hooks: journal?.hooksOf(session) ?? null });
+	}
 	return serveStatic(request, response);
 }
 
@@ -331,7 +339,8 @@ if (args.demo) {
 	}
 } else {
 	workspaces = createWorkspaceRegistry({ dataDir: dir, extraFolders: args.workspace });
-	history = createHistory({ dataDir: dir, workspaces, pricing });
+	journal = createJournalReader();
+	history = createHistory({ dataDir: dir, workspaces, pricing, journal });
 	mcpNames = createMcpNames({ folders: () => workspaces.list().map((workspace) => workspace.path) });
 	const { recorded, published } = loadRecorded(Number(args.days), Number(args.retention));
 	console.log(

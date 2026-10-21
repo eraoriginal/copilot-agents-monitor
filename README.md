@@ -32,10 +32,10 @@ endpoint needs setting. It listens on both `127.0.0.1` and `::1`, because `local
 IPv6 first on Windows.
 
 Optional: without more, the page shows what each agent did but not what it was asked or what it
-read. The note *Arguments and results show here with hooks, or with
-chat.agentHost.otel.captureContent: true* says so. [What spans leave
-out](#what-spans-leave-out) lists what is missing and how to turn it on: content capture
-(`"chat.agentHost.otel.captureContent": true`) or `npm run install-hooks`.
+read. The note *Arguments and results show here with chat.agentHost.otel.captureContent: true*
+says so. [What spans leave out](#what-spans-leave-out) lists what is missing and how to turn it
+on: content capture (`"chat.agentHost.otel.captureContent": true`), the way that costs the agents
+nothing, or the hooks' tool events, which slow every tool call down.
 
 ## What the page shows
 
@@ -92,6 +92,9 @@ out](#what-spans-leave-out) lists what is missing and how to turn it on: content
   and tool, and the tokens its result added. `Esc` closes the panel.
 
   ![A scout's tool calls: its Atlassian calls and what they cost, then each call, one opened](docs/media/tool-calls.png)
+- **Indicators**, each against a target ([Indicators](#indicators) says how each is measured):
+  the session's cost; the root agent's wake-ups on a cold cache; the largest context an agent
+  run sent; and the hooks' share of the agents' working time.
 - **Progress**: the agent's todo list when one is reported, otherwise subagents done.
 - **Routing**: each agent's model against the ones its `.agent.md` declares — as declared, on a
   fallback, off its list, or no model declared — and what the session would have cost had every
@@ -129,6 +132,29 @@ moves when the system asks for reduced motion.
 ![The history: tickets with their sessions, agent time, cost and saving; cost by ticket and by agent](docs/media/history.png)
 
 A session enters the history once it has been quiet for 30 seconds.
+
+## Indicators
+
+Four numbers that say whether a multi-agent workflow spends well, shown for the session in the
+**Indicators** panel and kept for each session in the history's table. They are computed in
+[`public/indicators.js`](public/indicators.js).
+
+| Indicator | What it measures | Target |
+|---|---|---|
+| **cost** | The session's AI credits, by agent in *Cost by agent*. Compare tickets in the history | — |
+| **wake-ups** | The root agent's calls, across turns and after its first, that wrote at least half of a prompt of 30k tokens or more to the cache: the cache had gone cold. Copilot keeps a Claude model's cache five minutes, so an orchestrator that waits longer for its subagents, or for you, pays for its whole context again. Shown as count × average tokens rewritten, and their credits | < 60k tokens each |
+| **largest context** | The largest prompt one agent run sent. The cost of a call grows with it, and every call of the run sends it again | < 150k tokens |
+| **hooks** | The hooks' time over the agents' working time: their turns, a model call and the tool calls it asked for, each agent on its own; waiting for you or for subagents is not working time. Each hook is a process the agent waits for | < 5% |
+
+The first three come from the spans. The hooks' time is not in them: the monitor reads it from
+Copilot's own journal of the session, `~/.copilot/session-state/<session id>/events.jsonl`
+(`COPILOT_HOME` moves `~/.copilot`), which the agent host writes whatever the hooks and the OTel
+settings. It reads only the hook and turn events, and only what was appended since its last read
+([`src/copilotJournal.js`](src/copilotJournal.js)). Without that journal on the machine, the hooks
+show `—`.
+
+The targets are where a session stops wasting: below them, the next saving is elsewhere. Change
+them in `TARGETS` at the top of `public/indicators.js`.
 
 ## Workspaces, branches, tickets
 
@@ -210,9 +236,10 @@ Two ways to get the rest, alone or together:
 
    Then quit VS Code completely and reopen it, as for the settings above. This is the agent
    host's setting; no equivalent for the chat extension's harness was checked.
-2. **Hooks**: `npm run install-hooks` shows the hook file, and `npm run install-hooks -- --yes`
-   writes `~/.copilot/hooks/agent-monitor.json`, which applies to every workspace you open. See
-   [Hooks](#hooks) below, including that they did not run on Copilot Free.
+2. **Hooks with their tool events**: `npm run install-hooks -- --yes --tools` writes
+   `~/.copilot/hooks/agent-monitor.json` with PreToolUse and PostToolUse, which carry each tool
+   call's arguments and result. They slow every tool call down: see [Hooks](#hooks) below,
+   including that they did not run on Copilot Free. Prefer content capture.
 
 Both write what they capture to `~/.agent-monitor`: prompts, file contents, commands and tool
 results, kept for 14 days. It stays on the machine, but on a project that reads tickets or
@@ -222,10 +249,20 @@ changes after you turn them on, that may be why.
 
 ### Hooks
 
-Hooks add what spans leave out: the moment a subagent starts, and tool arguments (the brief a
-subagent receives, the todo list) without turning on content capture. The hook script appends
-each event to a file and exits 0 without writing to stdout: it never blocks a call and never takes
-a permission decision another hook should take.
+Hooks add what spans leave out: the moment a subagent starts, and the prompt that started the
+turn. `npm run install-hooks` shows the hook file, and `npm run install-hooks -- --yes` writes
+`~/.copilot/hooks/agent-monitor.json`, which applies to every workspace you open. The hook script
+appends each event to a file and exits 0 without writing to stdout: it never blocks a call and
+never takes a permission decision another hook should take.
+
+By default the file takes only the events that happen a few times per turn: SessionStart,
+UserPromptSubmit, PreCompact, SubagentStart, SubagentStop and Stop. The host starts a process for
+every hook it runs, and waits for it: PreToolUse and PostToolUse would run one before and one
+after every tool call. Measured from 19 to 21 October 2026, in the agent host on Windows, they
+added 1 to 2 seconds to each tool call, a file read included. With content capture on, spans
+carry the same arguments and results, so the tool events bring nothing more. Where content
+capture is off, `--tools` adds them back, knowingly. A file written by an earlier version has
+them: write it again with `npm run install-hooks -- --yes`.
 
 Each entry gives the command once per shell: `command` and `bash` as is, and `powershell` behind
 the call operator `&`. On Windows the agent host runs hooks through PowerShell, which reads a line
@@ -310,8 +347,10 @@ npm run capture
 | `src/store.js` | day files: append, read, tail, purge |
 | `src/workspaces.js` | workspace discovery, agent files, branches and their changes |
 | `src/history.js` | session summaries, kept in `sessions.jsonl` |
+| `src/copilotJournal.js` | the hooks' time, read from Copilot's journal of each session as it grows |
 | `src/mcp.js` | the names of the MCP servers, by the SHA-256 Copilot reports them as |
 | `public/model.js` | the state model, shared by the page, the server and the tests |
+| `public/indicators.js` | a session's four indicators and their targets |
 | `public/routing.js` | agent files, the routing check, the routing comparison |
 | `public/workspaces.js` | a session's workspace, branch and ticket |
 | `public/app.js` | the page |

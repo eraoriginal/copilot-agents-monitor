@@ -76,3 +76,28 @@ test("a quiet session is summarized with its workspace, branch, ticket and cost,
 	assert.equal(reloaded.list()[0].totals.tools, 1);
 	assert.equal(parseLines(readFileSync(join(dataDir, "sessions.jsonl"), "utf8")).length, 2);
 });
+
+test("a summary keeps the session's indicators, the hooks' share from the journal included", (t) => {
+	const dataDir = mkdtempSync(join(tmpdir(), "agent-monitor-history-"));
+	t.after(() => rmSync(dataDir, { recursive: true, force: true }));
+	const workspaces = { list: () => [] };
+	const pricing = { usdPerCredit: 0.01, models: {} };
+	const asked = [];
+	const journal = {
+		hooksOf(id) {
+			asked.push(id);
+			return { hookMs: 6000, workMs: 60_000, share: 0.1, byType: {} };
+		},
+	};
+
+	const history = createHistory({ dataDir, workspaces, pricing, journal });
+	t.after(() => history.stop());
+	for (const record of SPANS) history.ingest({ kind: "span", time: record.end, data: record });
+	history.flushAll();
+
+	const [summary] = history.list();
+	assert.deepEqual(asked, ["session-1"]);
+	assert.deepEqual(summary.indicators.wakeUps, { count: 0, average: 0, credits: 0 });
+	assert.deepEqual(summary.indicators.context, { max: 1000, agent: "conductor" });
+	assert.deepEqual(summary.indicators.hooks, { share: 0.1, hookMs: 6000, workMs: 60_000 });
+});
